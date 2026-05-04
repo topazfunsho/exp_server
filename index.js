@@ -12,7 +12,7 @@ if (!MONGO_URI) {
 
 if (!process.env.JWT_SECRET) {
   console.error('JWT_SECRET is not defined in .env');
-  process.exit(1);
+  process.exit(2);
 }
 
 mongoose
