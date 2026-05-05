@@ -22,8 +22,13 @@ const signalSchema = new mongoose.Schema(
       type: Number,
       required: [true, 'Entry price is required'],
     },
+    entryTime: {
+      // When the user should open the trade (at least 1 min after signal is generated)
+      type: Date,
+      required: [true, 'Entry time is required'],
+    },
     expiryTime: {
-      // Exact datetime when the trade expires
+      // When the trade closes (entryTime + trade duration)
       type: Date,
       required: [true, 'Expiry time is required'],
     },
@@ -47,11 +52,10 @@ const signalSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['active', 'expired', 'won', 'lost', 'skipped'],
-      default: 'active',
+      enum: ['pending', 'active', 'expired', 'won', 'lost', 'skipped', 'cancelled'],
+      default: 'pending',  // starts as pending until entryTime is reached
     },
     result: {
-      // Filled after expiry: actual outcome
       type: String,
       enum: ['win', 'loss', 'draw', null],
       default: null,

@@ -24,13 +24,11 @@ const { rsi, macd, bollingerBands, stochastic, atr, cci, emaCrossover } = requir
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// Lowered from 45 → 20 so medium-strength signals are emitted every minute
-const MIN_SCORE        = 20;
-const SIGNAL_TIMEFRAME = '1m'; // ExpertOption 1-minute expiry
-const EXPIRY_SECONDS   = 60;   // signal expires in 60 seconds
+const MIN_SCORE          = 20;
+const SIGNAL_TIMEFRAME   = '1m';
+const ENTRY_DELAY_SECS   = 60;   // user has 60s to prepare before entry opens
+const TRADE_DURATION_SECS = 60;  // trade lasts 60s after entry opens
 
-// Base score added to every signal so even 1–2 agreeing indicators
-// produce a visible confidence value (e.g. 35–55 range)
 const BASE_SCORE = 30;
 
 // Indicator weights (must sum to 100 for clean normalisation)
@@ -265,25 +263,28 @@ async function run() {
     console.log('[Engine] Created system user');
   }
 
-  // Expire any still-active signals for this pair
+  // Expire any still-pending/active signals for this pair
   await Signal.updateMany(
-    { asset: best.symbol, status: 'active' },
-    { $set: { status: 'expired' } }
+    { asset: best.symbol, status: { $in: ['pending', 'active'] } },
+    { $set: { status: 'skipped' } }
   );
 
-  const expiryTime = new Date(Date.now() + EXPIRY_SECONDS * 1000);
+  const now        = Date.now();
+  const entryTime  = new Date(now + ENTRY_DELAY_SECS * 1000);
+  const expiryTime = new Date(now + ENTRY_DELAY_SECS * 1000 + TRADE_DURATION_SECS * 1000);
 
   const signal = await Signal.create({
-    asset:      best.symbol,
-    direction:  best.direction,
-    timeframe:  SIGNAL_TIMEFRAME,
-    entryPrice: best.entryPrice,
+    asset:       best.symbol,
+    direction:   best.direction,
+    timeframe:   SIGNAL_TIMEFRAME,
+    entryPrice:  best.entryPrice,
+    entryTime,
     expiryTime,
-    confidence: best.score,
-    indicators: best.indicators,
-    notes:      best.notes,
-    status:     'active',
-    createdBy:  systemUser._id,
+    confidence:  best.score,
+    indicators:  best.indicators,
+    notes:       best.notes,
+    status:      'pending',   // pending until entryTime is reached
+    createdBy:   systemUser._id,
     generatedBy: 'engine',
   });
 

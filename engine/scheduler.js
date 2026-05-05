@@ -47,23 +47,33 @@ async function tick() {
 }
 
 /**
- * Expire signals whose expiryTime has passed.
- * - Signals with no result → marked 'skipped' (user never acted on them)
- * - Signals already have a result → left as-is (won/lost/draw handled by setResult)
- * Runs every 15 seconds regardless of pause state.
+ * Lifecycle manager — runs every 15 seconds:
+ *  1. pending → active  when entryTime has passed
+ *  2. active  → skipped when expiryTime has passed with no result (user didn't act)
  */
 async function expireStaleSignals() {
   try {
-    // Mark active signals past expiry that have NO result as 'skipped'
+    const now = new Date();
+
+    // Activate signals whose entry window has opened
+    const activated = await Signal.updateMany(
+      { status: 'pending', entryTime: { $lte: now } },
+      { $set: { status: 'active' } }
+    );
+    if (activated.modifiedCount > 0) {
+      console.log(`[Scheduler] Activated ${activated.modifiedCount} signal(s) — entry time reached`);
+    }
+
+    // Skip signals whose trade window has closed with no result
     const skipped = await Signal.updateMany(
-      { status: 'active', expiryTime: { $lte: new Date() }, result: null },
+      { status: 'active', expiryTime: { $lte: now }, result: null },
       { $set: { status: 'skipped' } }
     );
     if (skipped.modifiedCount > 0) {
       console.log(`[Scheduler] Skipped ${skipped.modifiedCount} unacted signal(s)`);
     }
   } catch (err) {
-    console.error('[Scheduler] Expiry error:', err.message);
+    console.error('[Scheduler] Lifecycle error:', err.message);
   }
 }
 

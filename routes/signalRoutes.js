@@ -9,6 +9,7 @@ const {
   deleteSignal,
   getStats,
   setResult,
+  cancelSignal,
 } = require('../controllers/signalController');
 const { protect, adminOnly } = require('../middleware/authMiddleware');
 
@@ -29,6 +30,9 @@ router.get('/:id', getSignalById);
 
 // POST /api/signals/:id/result  — any authenticated user (WIN/LOSS button)
 router.post('/:id/result', setResult);
+
+// POST /api/signals/:id/cancel  — any authenticated user (CANCEL button)
+router.post('/:id/cancel', cancelSignal);
 
 // POST /api/signals  — admin only
 router.post('/', adminOnly, createSignal);

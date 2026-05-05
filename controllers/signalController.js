@@ -55,8 +55,8 @@ exports.getSignals = async (req, res) => {
     if (status) {
       filter.status = status;
     } else {
-      // Default: exclude skipped signals — they were never acted on
-      filter.status = { $ne: 'skipped' };
+      // Default: exclude skipped and cancelled signals
+      filter.status = { $nin: ['skipped', 'cancelled'] };
     }
 
     if (asset) filter.asset = new RegExp(asset, 'i');
@@ -88,18 +88,15 @@ exports.getSignals = async (req, res) => {
 
 /**
  * GET /api/signals/live
- * Protected — get only currently active signals (not yet expired)
+ * Protected — returns pending (entry window not yet open) and active signals.
  */
 exports.getLiveSignals = async (req, res) => {
   try {
-    const now = new Date();
-
     const signals = await Signal.find({
-      status: 'active',
-      expiryTime: { $gt: now },
+      status: { $in: ['pending', 'active'] },
     })
       .populate('createdBy', 'name')
-      .sort({ expiryTime: 1 }); // soonest expiry first
+      .sort({ entryTime: 1 }); // soonest entry first
 
     res.json({ count: signals.length, signals });
   } catch (err) {
@@ -192,8 +189,8 @@ exports.deleteSignal = async (req, res) => {
 exports.getStats = async (req, res) => {
   try {
     const stats = await Signal.aggregate([
-      // Exclude skipped signals — user never traded them
-      { $match: { status: { $ne: 'skipped' } } },
+      // Exclude skipped and cancelled signals — user never traded them
+      { $match: { status: { $nin: ['skipped', 'cancelled'] } } },
       {
         $group: {
           _id: '$result',
@@ -223,8 +220,29 @@ exports.getStats = async (req, res) => {
 };
 
 /**
- * POST /api/signals/:id/result
- * Protected (any user) — mark a signal as won or lost after expiry.
+ * POST /api/signals/:id/cancel
+ * Protected (any user) — cancel a pending or active signal the user doesn't want.
+ * Cancelled signals are excluded from stats (same as skipped).
+ */
+exports.cancelSignal = async (req, res) => {
+  try {
+    const signal = await Signal.findById(req.params.id);
+    if (!signal) {
+      return res.status(404).json({ message: 'Signal not found' });
+    }
+
+    if (!['pending', 'active'].includes(signal.status)) {
+      return res.status(400).json({ message: 'Only pending or active signals can be cancelled' });
+    }
+
+    signal.status = 'cancelled';
+    await signal.save();
+
+    res.json({ message: 'Signal cancelled', signal });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
  * This is the "user clicks WIN/LOSS button" action.
  * Once a result is set the signal is counted in stats.
  */
