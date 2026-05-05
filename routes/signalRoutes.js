@@ -8,23 +8,27 @@ const {
   updateSignal,
   deleteSignal,
   getStats,
+  setResult,
 } = require('../controllers/signalController');
 const { protect, adminOnly } = require('../middleware/authMiddleware');
 
 // All signal routes require authentication
 router.use(protect);
 
-// GET /api/signals/live  — active signals not yet expired
+// GET /api/signals/live
 router.get('/live', getLiveSignals);
 
-// GET /api/signals/stats  — win/loss summary
+// GET /api/signals/stats
 router.get('/stats', getStats);
 
-// GET /api/signals  — paginated list with optional filters
+// GET /api/signals
 router.get('/', getSignals);
 
 // GET /api/signals/:id
 router.get('/:id', getSignalById);
+
+// POST /api/signals/:id/result  — any authenticated user (WIN/LOSS button)
+router.post('/:id/result', setResult);
 
 // POST /api/signals  — admin only
 router.post('/', adminOnly, createSignal);

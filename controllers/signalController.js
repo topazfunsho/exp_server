@@ -37,22 +37,34 @@ exports.createSignal = async (req, res) => {
  * GET /api/signals
  * Protected — get all signals (newest first)
  * Query params:
- *   ?status=active|expired|won|lost
+ *   ?status=active|expired|won|lost|skipped
  *   ?asset=EUR/USD
+ *   ?generatedBy=engine|manual
  *   ?limit=20  (default 20, max 100)
  *   ?page=1
+ *
+ * By default, 'skipped' signals (expired with no user action) are excluded
+ * unless ?status=skipped is explicitly requested.
  */
 exports.getSignals = async (req, res) => {
   try {
-    const { status, asset, limit = 20, page = 1 } = req.query;
+    const { status, asset, generatedBy, limit = 20, page = 1 } = req.query;
 
     const filter = {};
-    if (status) filter.status = status;
-    if (asset) filter.asset = new RegExp(asset, 'i');
 
-    const pageNum = Math.max(1, parseInt(page));
+    if (status) {
+      filter.status = status;
+    } else {
+      // Default: exclude skipped signals — they were never acted on
+      filter.status = { $ne: 'skipped' };
+    }
+
+    if (asset) filter.asset = new RegExp(asset, 'i');
+    if (generatedBy) filter.generatedBy = generatedBy;
+
+    const pageNum  = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
-    const skip = (pageNum - 1) * limitNum;
+    const skip     = (pageNum - 1) * limitNum;
 
     const [signals, total] = await Promise.all([
       Signal.find(filter)
@@ -173,11 +185,15 @@ exports.deleteSignal = async (req, res) => {
 
 /**
  * GET /api/signals/stats
- * Protected — win/loss stats summary
+ * Protected — win/loss stats summary.
+ * Only counts signals the user actually acted on (won/lost/draw).
+ * Skipped signals (expired with no action) are excluded entirely.
  */
 exports.getStats = async (req, res) => {
   try {
     const stats = await Signal.aggregate([
+      // Exclude skipped signals — user never traded them
+      { $match: { status: { $ne: 'skipped' } } },
       {
         $group: {
           _id: '$result',
@@ -189,10 +205,10 @@ exports.getStats = async (req, res) => {
     const summary = { win: 0, loss: 0, draw: 0, pending: 0, total: 0 };
 
     stats.forEach(({ _id, count }) => {
-      if (_id === 'win') summary.win = count;
+      if (_id === 'win')       summary.win  = count;
       else if (_id === 'loss') summary.loss = count;
       else if (_id === 'draw') summary.draw = count;
-      else summary.pending += count; // null result = not yet resolved
+      else                     summary.pending += count; // null = active, not yet resolved
       summary.total += count;
     });
 
@@ -201,6 +217,39 @@ exports.getStats = async (req, res) => {
       resolved > 0 ? ((summary.win / resolved) * 100).toFixed(1) + '%' : 'N/A';
 
     res.json(summary);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * POST /api/signals/:id/result
+ * Protected (any user) — mark a signal as won or lost after expiry.
+ * This is the "user clicks WIN/LOSS button" action.
+ * Once a result is set the signal is counted in stats.
+ */
+exports.setResult = async (req, res) => {
+  try {
+    const { result } = req.body;
+
+    if (!['win', 'loss', 'draw'].includes(result)) {
+      return res.status(400).json({ message: 'result must be win, loss or draw' });
+    }
+
+    const signal = await Signal.findById(req.params.id);
+    if (!signal) {
+      return res.status(404).json({ message: 'Signal not found' });
+    }
+
+    // Map result → status
+    const statusMap = { win: 'won', loss: 'lost', draw: 'expired' };
+
+    signal.result = result;
+    // If it was skipped (user came back late), un-skip it and record the result
+    signal.status = statusMap[result];
+    await signal.save();
+
+    res.json({ message: 'Result saved', signal });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

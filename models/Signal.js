@@ -47,7 +47,7 @@ const signalSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['active', 'expired', 'won', 'lost'],
+      enum: ['active', 'expired', 'won', 'lost', 'skipped'],
       default: 'active',
     },
     result: {
