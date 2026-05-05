@@ -243,7 +243,7 @@ exports.cancelSignal = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
- * This is the "user clicks WIN/LOSS button" action.
+ /* This is the "user clicks WIN/LOSS button" action.
  * Once a result is set the signal is counted in stats.
  */
 exports.setResult = async (req, res) => {
