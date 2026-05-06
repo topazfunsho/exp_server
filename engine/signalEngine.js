@@ -24,12 +24,11 @@ const { rsi, macd, bollingerBands, stochastic, atr, cci, emaCrossover } = requir
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// Minimum score to emit a signal — set high to target ~70% win rate
-const MIN_SCORE           = 60;
+// Minimum score to emit a signal — tuned for ~65% win rate
+const MIN_SCORE           = 45;
 
 // Minimum number of indicators that must agree on direction
-// (prevents signals driven by just 1–2 indicators)
-const MIN_INDICATORS      = 3;
+const MIN_INDICATORS      = 2;
 
 const SIGNAL_TIMEFRAME    = '1m';
 const ENTRY_DELAY_SECS    = 60;
@@ -70,13 +69,12 @@ function scorePair(symbol) {
     let rsiSignal = 'NEUTRAL';
     let rsiStrength = 0;
 
-    if (currentRsi <= 30) {
+    if (currentRsi <= 35) {
       rsiSignal = 'BUY';
-      // Scale: RSI 30 → strength 0, RSI 10 → strength 100
-      rsiStrength = Math.min(100, Math.round(((30 - currentRsi) / 30) * 100));
-    } else if (currentRsi >= 70) {
+      rsiStrength = Math.min(100, Math.round(((35 - currentRsi) / 35) * 100));
+    } else if (currentRsi >= 65) {
       rsiSignal = 'SELL';
-      rsiStrength = Math.min(100, Math.round(((currentRsi - 70) / 30) * 100));
+      rsiStrength = Math.min(100, Math.round(((currentRsi - 65) / 35) * 100));
     }
 
     if (rsiSignal !== 'NEUTRAL') {
@@ -130,12 +128,12 @@ function scorePair(symbol) {
     let stochSignal = 'NEUTRAL';
     let stochStrength = 0;
 
-    if (stochResult.k <= 20) {
+    if (stochResult.k <= 25) {
       stochSignal = 'BUY';
-      stochStrength = Math.min(100, Math.round(((20 - stochResult.k) / 20) * 100));
-    } else if (stochResult.k >= 80) {
+      stochStrength = Math.min(100, Math.round(((25 - stochResult.k) / 25) * 100));
+    } else if (stochResult.k >= 75) {
       stochSignal = 'SELL';
-      stochStrength = Math.min(100, Math.round(((stochResult.k - 80) / 20) * 100));
+      stochStrength = Math.min(100, Math.round(((stochResult.k - 75) / 25) * 100));
     }
 
     if (stochSignal !== 'NEUTRAL') {
@@ -159,12 +157,12 @@ function scorePair(symbol) {
     let cciSignal = 'NEUTRAL';
     let cciStrength = 0;
 
-    if (cciResult.value <= -100) {
+    if (cciResult.value <= -85) {
       cciSignal = 'BUY';
-      cciStrength = Math.min(100, Math.round(Math.abs(cciResult.value + 100) / 2));
-    } else if (cciResult.value >= 100) {
+      cciStrength = Math.min(100, Math.round(Math.abs(cciResult.value + 85) / 2));
+    } else if (cciResult.value >= 85) {
       cciSignal = 'SELL';
-      cciStrength = Math.min(100, Math.round((cciResult.value - 100) / 2));
+      cciStrength = Math.min(100, Math.round((cciResult.value - 85) / 2));
     }
 
     if (cciSignal !== 'NEUTRAL') {
