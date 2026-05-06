@@ -24,14 +24,21 @@ const { rsi, macd, bollingerBands, stochastic, atr, cci, emaCrossover } = requir
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const MIN_SCORE          = 20;
-const SIGNAL_TIMEFRAME   = '1m';
-const ENTRY_DELAY_SECS   = 60;   // user has 60s to prepare before entry opens
-const TRADE_DURATION_SECS = 60;  // trade lasts 60s after entry opens
+// Minimum score to emit a signal — set high to target ~70% win rate
+const MIN_SCORE           = 60;
 
-const BASE_SCORE = 30;
+// Minimum number of indicators that must agree on direction
+// (prevents signals driven by just 1–2 indicators)
+const MIN_INDICATORS      = 3;
 
-// Indicator weights (must sum to 100 for clean normalisation)
+const SIGNAL_TIMEFRAME    = '1m';
+const ENTRY_DELAY_SECS    = 60;
+const TRADE_DURATION_SECS = 60;
+
+// No BASE_SCORE — confidence must be earned purely from indicator agreement
+const BASE_SCORE = 0;
+
+// Indicator weights (sum to 100)
 const WEIGHTS = {
   rsi:          20,
   macd:         20,
@@ -56,20 +63,20 @@ function scorePair(symbol) {
   const notes = [];
 
   // ── RSI ──────────────────────────────────────────────────────────────────
-  // Relaxed: was <30/>70 (strong only). Now <40/>60 catches medium setups.
+  // Classic strong zones: <30 oversold (BUY), >70 overbought (SELL)
   const rsiResult = rsi(closes, 14);
   if (rsiResult) {
     const currentRsi = rsiResult.value;
     let rsiSignal = 'NEUTRAL';
     let rsiStrength = 0;
 
-    if (currentRsi < 40) {
+    if (currentRsi <= 30) {
       rsiSignal = 'BUY';
-      // Scale: RSI 40 → strength 0, RSI 20 → strength 100
-      rsiStrength = Math.min(100, Math.round(((40 - currentRsi) / 40) * 100));
-    } else if (currentRsi > 60) {
+      // Scale: RSI 30 → strength 0, RSI 10 → strength 100
+      rsiStrength = Math.min(100, Math.round(((30 - currentRsi) / 30) * 100));
+    } else if (currentRsi >= 70) {
       rsiSignal = 'SELL';
-      rsiStrength = Math.min(100, Math.round(((currentRsi - 60) / 40) * 100));
+      rsiStrength = Math.min(100, Math.round(((currentRsi - 70) / 30) * 100));
     }
 
     if (rsiSignal !== 'NEUTRAL') {
@@ -77,11 +84,11 @@ function scorePair(symbol) {
       if (rsiSignal === 'BUY') {
         bullScore += contribution;
         activeIndicators.push('RSI');
-        notes.push(`RSI ${currentRsi} (${currentRsi < 30 ? 'oversold' : 'bearish zone'})`);
+        notes.push(`RSI ${currentRsi} (oversold)`);
       } else {
         bearScore += contribution;
         activeIndicators.push('RSI');
-        notes.push(`RSI ${currentRsi} (${currentRsi > 70 ? 'overbought' : 'bullish zone'})`);
+        notes.push(`RSI ${currentRsi} (overbought)`);
       }
     }
   }
@@ -117,18 +124,18 @@ function scorePair(symbol) {
   }
 
   // ── Stochastic ────────────────────────────────────────────────────────────
-  // Relaxed: was <20/>80. Now <30/>70 catches medium momentum.
+  // Classic strong zones: <20 oversold (BUY), >80 overbought (SELL)
   const stochResult = stochastic(highs, lows, closes, 14, 3);
   if (stochResult) {
     let stochSignal = 'NEUTRAL';
     let stochStrength = 0;
 
-    if (stochResult.k < 30) {
+    if (stochResult.k <= 20) {
       stochSignal = 'BUY';
-      stochStrength = Math.min(100, Math.round(((30 - stochResult.k) / 30) * 100));
-    } else if (stochResult.k > 70) {
+      stochStrength = Math.min(100, Math.round(((20 - stochResult.k) / 20) * 100));
+    } else if (stochResult.k >= 80) {
       stochSignal = 'SELL';
-      stochStrength = Math.min(100, Math.round(((stochResult.k - 70) / 30) * 100));
+      stochStrength = Math.min(100, Math.round(((stochResult.k - 80) / 20) * 100));
     }
 
     if (stochSignal !== 'NEUTRAL') {
@@ -136,28 +143,28 @@ function scorePair(symbol) {
       if (stochSignal === 'BUY') {
         bullScore += contribution;
         activeIndicators.push('Stochastic');
-        notes.push(`Stoch %K ${stochResult.k} (${stochResult.k < 20 ? 'oversold' : 'low momentum'})`);
+        notes.push(`Stoch %K ${stochResult.k} (oversold)`);
       } else {
         bearScore += contribution;
         activeIndicators.push('Stochastic');
-        notes.push(`Stoch %K ${stochResult.k} (${stochResult.k > 80 ? 'overbought' : 'high momentum'})`);
+        notes.push(`Stoch %K ${stochResult.k} (overbought)`);
       }
     }
   }
 
   // ── CCI ───────────────────────────────────────────────────────────────────
-  // Relaxed: was ±100. Now ±75 catches medium-strength momentum.
+  // Classic strong zones: <-100 oversold (BUY), >+100 overbought (SELL)
   const cciResult = cci(highs, lows, closes, 20);
   if (cciResult) {
     let cciSignal = 'NEUTRAL';
     let cciStrength = 0;
 
-    if (cciResult.value <= -75) {
+    if (cciResult.value <= -100) {
       cciSignal = 'BUY';
-      cciStrength = Math.min(100, Math.round(Math.abs(cciResult.value + 75) / 1.5));
-    } else if (cciResult.value >= 75) {
+      cciStrength = Math.min(100, Math.round(Math.abs(cciResult.value + 100) / 2));
+    } else if (cciResult.value >= 100) {
       cciSignal = 'SELL';
-      cciStrength = Math.min(100, Math.round((cciResult.value - 75) / 1.5));
+      cciStrength = Math.min(100, Math.round((cciResult.value - 100) / 2));
     }
 
     if (cciSignal !== 'NEUTRAL') {
@@ -165,11 +172,11 @@ function scorePair(symbol) {
       if (cciSignal === 'BUY') {
         bullScore += contribution;
         activeIndicators.push('CCI');
-        notes.push(`CCI ${cciResult.value} (${cciResult.value <= -100 ? 'oversold' : 'bearish pressure'})`);
+        notes.push(`CCI ${cciResult.value} (oversold)`);
       } else {
         bearScore += contribution;
         activeIndicators.push('CCI');
-        notes.push(`CCI ${cciResult.value} (${cciResult.value >= 100 ? 'overbought' : 'bullish pressure'})`);
+        notes.push(`CCI ${cciResult.value} (overbought)`);
       }
     }
   }
@@ -190,25 +197,56 @@ function scorePair(symbol) {
   }
 
   // ── ATR (volatility filter) ───────────────────────────────────────────────
-  // Raised floor from 0.6 → 0.85 so calm markets don't kill the score.
-  // Extremely high volatility (>1%) still gets a slight penalty.
+  // Block signals in two bad market conditions:
+  //   - Very low ATR (<0.003%): flat/choppy market, no real momentum
+  //   - Very high ATR (>1.5%): news spike, unpredictable price action
   const atrValue = atr(highs, lows, closes, 14);
   const currentPrice = closes[closes.length - 1];
   const atrPct = atrValue ? (atrValue / currentPrice) * 100 : 0;
-  const volatilityMultiplier = atrPct < 0.005 ? 0.85 : atrPct > 1.0 ? 0.90 : 1.0;
+
+  // Kill signal entirely in extreme volatility conditions
+  if (atrPct < 0.003 || atrPct > 1.5) {
+    return {
+      direction: bullScore >= bearScore ? 'BUY' : 'SELL',
+      score: 0, // will be filtered out by MIN_SCORE
+      indicators: [],
+      notes: atrPct < 0.003 ? 'Market too flat — no signal' : 'Market too volatile — no signal',
+      entryPrice: +currentPrice.toFixed(6),
+      atrPct: +atrPct.toFixed(4),
+    };
+  }
+
+  // Mild penalty for slightly elevated volatility (0.5–1.5%)
+  const volatilityMultiplier = atrPct > 0.5 ? 0.85 : 1.0;
 
   // ── Final score ───────────────────────────────────────────────────────────
-  const direction = bullScore >= bearScore ? 'BUY' : 'SELL';
-  const rawScore  = direction === 'BUY' ? bullScore : bearScore;
+  const direction      = bullScore >= bearScore ? 'BUY' : 'SELL';
+  const rawScore       = direction === 'BUY' ? bullScore : bearScore;
+  const uniqueIndicators = [...new Set(activeIndicators)];
 
-  // Add BASE_SCORE so even 1–2 agreeing indicators produce a visible
-  // medium-range confidence (35–65) rather than near-zero values.
-  const score = Math.min(100, Math.round(BASE_SCORE + rawScore * volatilityMultiplier));
+  // Hard gate: require at least MIN_INDICATORS agreeing
+  if (uniqueIndicators.length < MIN_INDICATORS) {
+    return {
+      direction,
+      score: 0,
+      indicators: uniqueIndicators,
+      notes: `Only ${uniqueIndicators.length} indicator(s) agree — need ${MIN_INDICATORS}`,
+      entryPrice: +currentPrice.toFixed(6),
+      atrPct: +atrPct.toFixed(4),
+    };
+  }
+
+  // Confluence bonus: 4+ indicators agreeing adds 15%, 5+ adds 25%
+  const confluenceBonus = uniqueIndicators.length >= 5 ? 1.25
+                        : uniqueIndicators.length >= 4 ? 1.15
+                        : 1.0;
+
+  const score = Math.min(100, Math.round(rawScore * volatilityMultiplier * confluenceBonus));
 
   return {
     direction,
     score,
-    indicators: [...new Set(activeIndicators)],
+    indicators: uniqueIndicators,
     notes: notes.join(' | '),
     entryPrice: +currentPrice.toFixed(6),
     atrPct: +atrPct.toFixed(4),
