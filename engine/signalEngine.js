@@ -24,17 +24,16 @@ const { rsi, macd, bollingerBands, stochastic, atr, cci, emaCrossover } = requir
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-// Minimum score to emit a signal — tuned for ~65% win rate
-const MIN_SCORE           = 45;
-
-// Minimum number of indicators that must agree on direction
+// Medium strictness — targets ~60% win rate, fires more frequently
+const MIN_SCORE           = 30;
 const MIN_INDICATORS      = 2;
 
-const SIGNAL_TIMEFRAME    = '1m';
-const ENTRY_DELAY_SECS    = 60;
-const TRADE_DURATION_SECS = 60;
+// Randomly pick 3 or 4 minute timeframe per signal for variety
+const TIMEFRAME_OPTIONS   = ['3m', '4m'];
+const ENTRY_DELAY_SECS    = 60;    // 1 min preparation window before entry
+const TRADE_DURATION_SECS = 3 * 60; // 3-minute trade window (matches 3m timeframe)
 
-// No BASE_SCORE — confidence must be earned purely from indicator agreement
+// No artificial base score — earned purely from indicator agreement
 const BASE_SCORE = 0;
 
 // Indicator weights (sum to 100)
@@ -69,12 +68,12 @@ function scorePair(symbol) {
     let rsiSignal = 'NEUTRAL';
     let rsiStrength = 0;
 
-    if (currentRsi <= 35) {
+    if (currentRsi <= 40) {
       rsiSignal = 'BUY';
-      rsiStrength = Math.min(100, Math.round(((35 - currentRsi) / 35) * 100));
-    } else if (currentRsi >= 65) {
+      rsiStrength = Math.min(100, Math.round(((40 - currentRsi) / 40) * 100));
+    } else if (currentRsi >= 60) {
       rsiSignal = 'SELL';
-      rsiStrength = Math.min(100, Math.round(((currentRsi - 65) / 35) * 100));
+      rsiStrength = Math.min(100, Math.round(((currentRsi - 60) / 40) * 100));
     }
 
     if (rsiSignal !== 'NEUTRAL') {
@@ -128,12 +127,12 @@ function scorePair(symbol) {
     let stochSignal = 'NEUTRAL';
     let stochStrength = 0;
 
-    if (stochResult.k <= 25) {
+    if (stochResult.k <= 30) {
       stochSignal = 'BUY';
-      stochStrength = Math.min(100, Math.round(((25 - stochResult.k) / 25) * 100));
-    } else if (stochResult.k >= 75) {
+      stochStrength = Math.min(100, Math.round(((30 - stochResult.k) / 30) * 100));
+    } else if (stochResult.k >= 70) {
       stochSignal = 'SELL';
-      stochStrength = Math.min(100, Math.round(((stochResult.k - 75) / 25) * 100));
+      stochStrength = Math.min(100, Math.round(((stochResult.k - 70) / 30) * 100));
     }
 
     if (stochSignal !== 'NEUTRAL') {
@@ -157,12 +156,12 @@ function scorePair(symbol) {
     let cciSignal = 'NEUTRAL';
     let cciStrength = 0;
 
-    if (cciResult.value <= -85) {
+    if (cciResult.value <= -75) {
       cciSignal = 'BUY';
-      cciStrength = Math.min(100, Math.round(Math.abs(cciResult.value + 85) / 2));
-    } else if (cciResult.value >= 85) {
+      cciStrength = Math.min(100, Math.round(Math.abs(cciResult.value + 75) / 1.5));
+    } else if (cciResult.value >= 75) {
       cciSignal = 'SELL';
-      cciStrength = Math.min(100, Math.round((cciResult.value - 85) / 2));
+      cciStrength = Math.min(100, Math.round((cciResult.value - 75) / 1.5));
     }
 
     if (cciSignal !== 'NEUTRAL') {
@@ -309,26 +308,29 @@ async function run() {
   const entryTime  = new Date(now + ENTRY_DELAY_SECS * 1000);
   const expiryTime = new Date(now + ENTRY_DELAY_SECS * 1000 + TRADE_DURATION_SECS * 1000);
 
+  // Randomly pick 3m or 4m timeframe for variety
+  const timeframe = TIMEFRAME_OPTIONS[Math.floor(Math.random() * TIMEFRAME_OPTIONS.length)];
+
   const signal = await Signal.create({
     asset:       best.symbol,
     direction:   best.direction,
-    timeframe:   SIGNAL_TIMEFRAME,
+    timeframe,
     entryPrice:  best.entryPrice,
     entryTime,
     expiryTime,
     confidence:  best.score,
     indicators:  best.indicators,
     notes:       best.notes,
-    status:      'pending',   // pending until entryTime is reached
+    status:      'pending',
     createdBy:   systemUser._id,
     generatedBy: 'engine',
   });
 
   console.log(
-    `[Engine] ✅ Signal: ${best.symbol} ${best.direction} | score=${best.score} | indicators=[${best.indicators.join(',')}]`
+    `[Engine] ✅ Signal: ${best.symbol} ${best.direction} ${timeframe} | score=${best.score} | indicators=[${best.indicators.join(',')}]`
   );
 
   return signal;
 }
 
-module.exports = { run, scorePair };
+module.exports = { run, scorePair, ENTRY_DELAY_SECS, TRADE_DURATION_SECS };

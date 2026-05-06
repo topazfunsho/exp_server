@@ -15,7 +15,7 @@ const signalSchema = new mongoose.Schema(
     },
     timeframe: {
       type: String,
-      enum: ['30s', '1m', '2m', '5m', '15m', '30m', '1h'],
+      enum: ['30s', '1m', '2m', '3m', '4m', '5m', '15m', '30m', '1h'],
       required: [true, 'Timeframe is required'],
     },
     entryPrice: {
