@@ -2,43 +2,37 @@
  * Price Simulator
  *
  * Generates realistic OHLCV candle history for each trading pair.
- * Uses a seeded random walk with volatility profiles per asset class.
  *
- * In production you would replace fetchCandles() with a real market
- * data provider (e.g. Twelve Data, Alpha Vantage, Binance WS, etc.)
- * The rest of the engine (indicators + scoring) stays identical.
+ * Key improvement for signal quality:
+ *  - Mean-reversion tendency: when price drifts far from its moving average,
+ *    it has a higher probability of reverting. This is what makes RSI/BB/Stoch
+ *    signals actually profitable — oversold conditions genuinely tend to bounce.
+ *  - Momentum persistence: recent trend has a small carry-forward effect,
+ *    so EMA crossovers and MACD signals have follow-through.
+ *
+ * In production replace fetchCandles() with a real market data provider.
  */
 
 'use strict';
 
-// ── Asset definitions ─────────────────────────────────────────────────────────
-// basePrice: approximate real-world price
-// volatility: daily % move (used to scale per-candle noise)
-// trend: slight directional bias (-1 to +1)
-
 const ASSETS = {
-  'EUR/USD':  { basePrice: 1.0850,  volatility: 0.0008, trend:  0.0 },
-  'GBP/USD':  { basePrice: 1.2700,  volatility: 0.0010, trend:  0.0 },
-  'USD/JPY':  { basePrice: 149.50,  volatility: 0.0009, trend:  0.0 },
-  'AUD/USD':  { basePrice: 0.6550,  volatility: 0.0009, trend:  0.0 },
-  'USD/CAD':  { basePrice: 1.3600,  volatility: 0.0008, trend:  0.0 },
-  'EUR/GBP':  { basePrice: 0.8550,  volatility: 0.0006, trend:  0.0 },
-  'USD/CHF':  { basePrice: 0.9050,  volatility: 0.0007, trend:  0.0 },
-  'NZD/USD':  { basePrice: 0.6100,  volatility: 0.0009, trend:  0.0 },
-  'BTC/USD':  { basePrice: 67000,   volatility: 0.0200, trend:  0.0 },
-  'ETH/USD':  { basePrice: 3500,    volatility: 0.0180, trend:  0.0 },
-  'XAU/USD':  { basePrice: 2350,    volatility: 0.0060, trend:  0.0 }, // Gold
-  'OIL/USD':  { basePrice: 82.00,   volatility: 0.0120, trend:  0.0 }, // Crude Oil
+  'EUR/USD': { basePrice: 1.0850, volatility: 0.0008 },
+  'GBP/USD': { basePrice: 1.2700, volatility: 0.0010 },
+  'USD/JPY': { basePrice: 149.50, volatility: 0.0009 },
+  'AUD/USD': { basePrice: 0.6550, volatility: 0.0009 },
+  'USD/CAD': { basePrice: 1.3600, volatility: 0.0008 },
+  'EUR/GBP': { basePrice: 0.8550, volatility: 0.0006 },
+  'USD/CHF': { basePrice: 0.9050, volatility: 0.0007 },
+  'NZD/USD': { basePrice: 0.6100, volatility: 0.0009 },
+  'BTC/USD': { basePrice: 67000,  volatility: 0.0200 },
+  'ETH/USD': { basePrice: 3500,   volatility: 0.0180 },
+  'XAU/USD': { basePrice: 2350,   volatility: 0.0060 },
+  'OIL/USD': { basePrice: 82.00,  volatility: 0.0120 },
 };
 
-// In-memory price state per asset (persists across calls within the process)
 const priceState = {};
 
-/**
- * Seeded pseudo-random number generator (Mulberry32)
- * Gives reproducible sequences per asset so candles are consistent
- * across multiple calls in the same minute.
- */
+// Seeded PRNG (Mulberry32) — reproducible per asset
 function mulberry32(seed) {
   return function () {
     seed |= 0;
@@ -49,9 +43,7 @@ function mulberry32(seed) {
   };
 }
 
-/**
- * Box-Muller transform: uniform → normal distribution
- */
+// Box-Muller: uniform → normal
 function normalRandom(rand) {
   let u = 0, v = 0;
   while (u === 0) u = rand();
@@ -59,71 +51,80 @@ function normalRandom(rand) {
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
-/**
- * Generate or retrieve the current price state for an asset.
- * Initialises with a warm-up walk so indicators have enough history.
- */
+// Simple moving average of last N values
+function simpleMA(arr, n) {
+  const slice = arr.slice(-n);
+  return slice.reduce((s, v) => s + v, 0) / slice.length;
+}
+
 function getOrInitState(symbol) {
   if (priceState[symbol]) return priceState[symbol];
 
-  const { basePrice, volatility, trend } = ASSETS[symbol];
-  // Seed based on symbol name so each asset has its own random stream
+  const { basePrice, volatility } = ASSETS[symbol];
   const seed = symbol.split('').reduce((s, c) => s + c.charCodeAt(0), 0);
   const rand = mulberry32(seed);
 
-  // Build 200 warm-up candles (1-minute each)
   const candles = [];
   let price = basePrice;
+  let momentum = 0; // carry-forward momentum
 
-  for (let i = 0; i < 200; i++) {
-    const move = normalRandom(rand) * volatility * price + trend * volatility * price * 0.1;
-    const open = price;
-    const close = Math.max(price * 0.5, price + move); // floor at 50% of base
-    const high = Math.max(open, close) * (1 + rand() * volatility * 0.5);
-    const low = Math.min(open, close) * (1 - rand() * volatility * 0.5);
+  for (let i = 0; i < 300; i++) {
+    // Mean-reversion: pull price back toward 20-bar MA when it drifts
+    const ma20 = candles.length >= 20
+      ? simpleMA(candles.slice(-20).map((c) => c.close), 20)
+      : basePrice;
+    const deviation = (price - ma20) / ma20;
+    // Reversion force proportional to how far price has drifted
+    const reversionForce = -deviation * 0.35;
+
+    // Momentum persistence (small carry-forward from last move)
+    momentum = momentum * 0.3 + normalRandom(rand) * volatility;
+
+    const move = price * (momentum + reversionForce * volatility);
+    const open  = price;
+    const close = Math.max(price * 0.5, price + move);
+    const high  = Math.max(open, close) * (1 + rand() * volatility * 0.4);
+    const low   = Math.min(open, close) * (1 - rand() * volatility * 0.4);
     const volume = Math.round(1000 + rand() * 9000);
 
     candles.push({ open, high, low, close, volume });
     price = close;
   }
 
-  priceState[symbol] = { candles, rand, volatility, trend, basePrice };
+  priceState[symbol] = { candles, rand, volatility, momentum };
   return priceState[symbol];
 }
 
-/**
- * Advance the price by one candle (called each minute by the scheduler).
- */
 function tickCandle(symbol) {
   const state = getOrInitState(symbol);
-  const { rand, volatility, trend } = state;
-  const prevClose = state.candles[state.candles.length - 1].close;
+  const { rand, volatility } = state;
+  const closes = state.candles.map((c) => c.close);
+  const prevClose = closes[closes.length - 1];
 
-  const move = normalRandom(rand) * volatility * prevClose + trend * volatility * prevClose * 0.1;
-  const open = prevClose;
+  // Mean-reversion toward 20-bar MA
+  const ma20 = simpleMA(closes.slice(-20), 20);
+  const deviation = (prevClose - ma20) / ma20;
+  const reversionForce = -deviation * 0.35;
+
+  // Momentum persistence
+  state.momentum = state.momentum * 0.3 + normalRandom(rand) * volatility;
+
+  const move  = prevClose * (state.momentum + reversionForce * volatility);
+  const open  = prevClose;
   const close = Math.max(prevClose * 0.5, prevClose + move);
-  const high = Math.max(open, close) * (1 + rand() * volatility * 0.5);
-  const low = Math.min(open, close) * (1 - rand() * volatility * 0.5);
+  const high  = Math.max(open, close) * (1 + rand() * volatility * 0.4);
+  const low   = Math.min(open, close) * (1 - rand() * volatility * 0.4);
   const volume = Math.round(1000 + rand() * 9000);
 
   state.candles.push({ open, high, low, close, volume });
-
-  // Keep only last 300 candles to avoid unbounded memory growth
-  if (state.candles.length > 300) state.candles.shift();
+  if (state.candles.length > 400) state.candles.shift();
 
   return { open, high, low, close, volume };
 }
 
-/**
- * Return the last N candles for a symbol (initialises if needed).
- * @param {string} symbol
- * @param {number} count  default 200
- * @returns {{ opens: number[], highs: number[], lows: number[], closes: number[], volumes: number[] }}
- */
 function fetchCandles(symbol, count = 200) {
   const state = getOrInitState(symbol);
   const slice = state.candles.slice(-count);
-
   return {
     opens:   slice.map((c) => c.open),
     highs:   slice.map((c) => c.high),
@@ -133,9 +134,6 @@ function fetchCandles(symbol, count = 200) {
   };
 }
 
-/**
- * Get the current (latest) price for a symbol.
- */
 function getCurrentPrice(symbol) {
   const state = getOrInitState(symbol);
   return state.candles[state.candles.length - 1].close;
