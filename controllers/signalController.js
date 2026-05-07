@@ -213,19 +213,24 @@ exports.deleteSignal = async (req, res) => {
 /**
  * GET /api/signals/stats
  * Protected — win/loss stats for the REQUESTING USER only.
- * Counts only their own UserSignal records (won/lost/draw).
- * Skipped and cancelled interactions are excluded.
+ *
+ * - win / loss / draw: count of resolved UserSignal records for this user
+ * - total: ONLY resolved signals (won + lost + draw) — unique to this user
+ * - pending: signals this user has taken but not yet recorded a result for
+ * - winRate: win / (win + loss + draw)
+ *
+ * Cancelled interactions are excluded entirely.
  */
 exports.getStats = async (req, res) => {
   try {
+    const userId = new mongoose.Types.ObjectId(req.user._id);
+
     const stats = await UserSignal.aggregate([
-      // Only this user's records
-      { $match: { user: new mongoose.Types.ObjectId(req.user._id) } },
-      // Exclude cancelled interactions
-      { $match: { status: { $nin: ['cancelled'] } } },
+      // Only this user's records, exclude cancelled
+      { $match: { user: userId, status: { $nin: ['cancelled'] } } },
       {
         $group: {
-          _id:   '$result',
+          _id:   '$result',   // 'win' | 'loss' | 'draw' | null
           count: { $sum: 1 },
         },
       },
@@ -234,16 +239,19 @@ exports.getStats = async (req, res) => {
     const summary = { win: 0, loss: 0, draw: 0, pending: 0, total: 0 };
 
     stats.forEach(({ _id, count }) => {
-      if (_id === 'win')       summary.win   += count;
-      else if (_id === 'loss') summary.loss  += count;
-      else if (_id === 'draw') summary.draw  += count;
-      else                     summary.pending += count; // null = taken but not resolved
-      summary.total += count;
+      if (_id === 'win')       summary.win     += count;
+      else if (_id === 'loss') summary.loss    += count;
+      else if (_id === 'draw') summary.draw    += count;
+      else                     summary.pending += count; // null result = taken, not yet resolved
     });
 
-    const resolved = summary.win + summary.loss + summary.draw;
+    // total = only signals the user actually completed (not pending ones)
+    summary.total = summary.win + summary.loss + summary.draw;
+
     summary.winRate =
-      resolved > 0 ? ((summary.win / resolved) * 100).toFixed(1) + '%' : 'N/A';
+      summary.total > 0
+        ? ((summary.win / summary.total) * 100).toFixed(1) + '%'
+        : 'N/A';
 
     res.json(summary);
   } catch (err) {

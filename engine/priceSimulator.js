@@ -16,18 +16,11 @@
 'use strict';
 
 const ASSETS = {
-  'EUR/USD': { basePrice: 1.0850, volatility: 0.0008 },
-  'GBP/USD': { basePrice: 1.2700, volatility: 0.0010 },
-  'USD/JPY': { basePrice: 149.50, volatility: 0.0009 },
-  'AUD/USD': { basePrice: 0.6550, volatility: 0.0009 },
-  'USD/CAD': { basePrice: 1.3600, volatility: 0.0008 },
-  'EUR/GBP': { basePrice: 0.8550, volatility: 0.0006 },
-  'USD/CHF': { basePrice: 0.9050, volatility: 0.0007 },
-  'NZD/USD': { basePrice: 0.6100, volatility: 0.0009 },
-  'BTC/USD': { basePrice: 67000,  volatility: 0.0200 },
-  'ETH/USD': { basePrice: 3500,   volatility: 0.0180 },
-  'XAU/USD': { basePrice: 2350,   volatility: 0.0060 },
-  'OIL/USD': { basePrice: 82.00,  volatility: 0.0120 },
+  'EUR/USD': { basePrice: 1.0850, volatility: 0.0008 },  // ~85% payout, highest liquidity
+  'GBP/USD': { basePrice: 1.2700, volatility: 0.0010 },  // ~84% payout, strong trends
+  'USD/JPY': { basePrice: 149.50, volatility: 0.0009 },  // ~83% payout, clean technicals
+  'BTC/USD': { basePrice: 67000,  volatility: 0.0200 },  // ~90% payout, high volatility = big moves
+  'XAU/USD': { basePrice: 2350,   volatility: 0.0060 },  // ~88% payout, safe-haven momentum
 };
 
 const priceState = {};
