@@ -61,7 +61,8 @@ exports.getSignals = async (req, res) => {
     if (status) {
       filter.status = status;
     } else {
-      filter.status = { $nin: ['skipped', 'cancelled'] };
+      // Default: exclude skipped, cancelled, and expired signals
+      filter.status = { $nin: ['skipped', 'cancelled', 'expired'] };
     }
     if (asset)       filter.asset       = new RegExp(asset, 'i');
     if (generatedBy) filter.generatedBy = generatedBy;
