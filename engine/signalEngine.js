@@ -1,120 +1,78 @@
-/**
- * Signal Engine — targets ~70% win rate
- *
- * Win rate improvement strategy:
- *  1. Mean-reverting price simulator — oversold/overbought conditions
- *     genuinely tend to reverse, making RSI/BB/Stoch signals profitable.
- *  2. Trend confirmation filter — before emitting, verify the last 5 candles
- *     show actual momentum in the signal direction (not just indicator noise).
- *  3. Indicator agreement gate — require at least 3 indicators to agree.
- *  4. Momentum score — weight recent price velocity alongside indicator score.
- *  5. Confluence bonus — 4+ agreeing indicators get a score multiplier.
- */
-
 'use strict';
+
+/**
+ * Signal Engine
+ *
+ * Uses four classic binary-options indicators:
+ *   RSI (14)              — oversold / overbought momentum
+ *   MACD (12, 26, 9)      — trend direction and crossover
+ *   Stochastic (14, 3)    — %K/%D momentum oscillator
+ *   Bollinger Bands (20)  — price deviation from mean
+ *
+ * Each indicator votes BUY or SELL with a strength 0–100.
+ * The pair with the highest combined score wins.
+ * Direction is whichever side (bull/bear) scores higher.
+ */
 
 const Signal = require('../models/Signal');
 const User   = require('../models/User');
 const { fetchCandles, tickCandle, ASSETS } = require('./priceSimulator');
-const { rsi, macd, bollingerBands, stochastic, atr, cci, emaCrossover, ema } = require('./indicators');
+const { rsi, macd, bollingerBands, stochastic, atr } = require('./indicators');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const MIN_SCORE           = 0;    // no minimum — always emit the best available signal
-const MIN_INDICATORS      = 1;    // any single indicator is enough to determine direction
+const MIN_SCORE           = 0;       // always emit — 50/50 mode
 const TIMEFRAME_OPTIONS   = ['3m', '4m'];
-const ENTRY_DELAY_SECS    = 60;
-const TRADE_DURATION_SECS = 3 * 60;
+const ENTRY_DELAY_SECS    = 60;      // 1 min prep window before entry
+const TRADE_DURATION_SECS = 3 * 60; // 3-min trade window
 
+// Equal weight across all four indicators (sum = 100)
 const WEIGHTS = {
-  rsi:          20,
-  macd:         20,
-  bollinger:    15,
-  stochastic:   15,
-  cci:          15,
-  emaCrossover: 15,
+  rsi:        25,
+  macd:       25,
+  stochastic: 25,
+  bollinger:  25,
 };
-
-// ── Trend confirmation ────────────────────────────────────────────────────────
-
-/**
- * Confirm that recent price action supports the signal direction.
- * Looks at the last `lookback` candles and checks:
- *  - For BUY: price is making higher lows (momentum turning up)
- *  - For SELL: price is making lower highs (momentum turning down)
- * Returns a multiplier 0.0–1.5 (>1.0 = strong confirmation, <1.0 = weak/against)
- */
-function trendConfirmation(closes, direction, lookback = 5) {
-  if (closes.length < lookback + 1) return 1.0;
-
-  const recent = closes.slice(-lookback);
-  const prev   = closes.slice(-(lookback * 2), -lookback);
-
-  if (prev.length === 0) return 1.0;
-
-  const recentAvg = recent.reduce((s, v) => s + v, 0) / recent.length;
-  const prevAvg   = prev.reduce((s, v) => s + v, 0) / prev.length;
-
-  const momentum = (recentAvg - prevAvg) / prevAvg; // positive = price rising
-
-  if (direction === 'BUY') {
-    // Price should be turning up or at least not strongly falling
-    if (momentum > 0.0002)  return 1.4;  // strong upward momentum — great BUY
-    if (momentum > 0)       return 1.2;  // mild upward — good BUY
-    if (momentum > -0.0002) return 0.9;  // flat — weak BUY
-    return 0.5;                          // falling — bad BUY, penalise heavily
-  } else {
-    // Price should be turning down
-    if (momentum < -0.0002) return 1.4;  // strong downward — great SELL
-    if (momentum < 0)       return 1.2;  // mild downward — good SELL
-    if (momentum < 0.0002)  return 0.9;  // flat — weak SELL
-    return 0.5;                          // rising — bad SELL, penalise heavily
-  }
-}
-
-/**
- * Check that the signal direction aligns with the medium-term trend (50-bar EMA).
- * Returns true if aligned, false if counter-trend (counter-trend signals lose more).
- */
-function isTrendAligned(closes, direction) {
-  if (closes.length < 55) return true; // not enough data, allow
-  const ema50 = ema(closes, 50);
-  const ema20 = ema(closes, 20);
-  if (!ema50 || !ema20) return true;
-
-  if (direction === 'BUY')  return ema20 >= ema50; // short MA above long MA = uptrend
-  if (direction === 'SELL') return ema20 <= ema50; // short MA below long MA = downtrend
-  return true;
-}
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
 
 function scorePair(symbol) {
   const { highs, lows, closes } = fetchCandles(symbol, 200);
+  const currentPrice = closes[closes.length - 1];
 
   let bullScore = 0;
   let bearScore = 0;
   const activeIndicators = [];
   const notes = [];
 
-  // ── RSI (classic oversold/overbought zones) ───────────────────────────────
+  // ── RSI (14) ──────────────────────────────────────────────────────────────
+  // BUY  when RSI ≤ 40 (oversold momentum turning up)
+  // SELL when RSI ≥ 60 (overbought momentum turning down)
   const rsiResult = rsi(closes, 14);
   if (rsiResult) {
     const v = rsiResult.value;
-    if (v <= 35) {
-      const strength = Math.min(100, Math.round(((35 - v) / 35) * 100));
+    if (v <= 40) {
+      // Strength scales: RSI 40 → 0%, RSI 0 → 100%
+      const strength = Math.min(100, Math.round(((40 - v) / 40) * 100));
       bullScore += (strength / 100) * WEIGHTS.rsi;
       activeIndicators.push('RSI');
       notes.push(`RSI ${v} (oversold)`);
-    } else if (v >= 65) {
-      const strength = Math.min(100, Math.round(((v - 65) / 35) * 100));
+    } else if (v >= 60) {
+      const strength = Math.min(100, Math.round(((v - 60) / 40) * 100));
       bearScore += (strength / 100) * WEIGHTS.rsi;
       activeIndicators.push('RSI');
       notes.push(`RSI ${v} (overbought)`);
+    } else {
+      // Neutral zone — still give a small directional nudge based on which side of 50
+      const nudge = ((50 - v) / 50) * WEIGHTS.rsi * 0.3; // max 30% of weight
+      if (v < 50) bullScore += nudge;
+      else        bearScore += nudge;
     }
   }
 
-  // ── MACD ──────────────────────────────────────────────────────────────────
+  // ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
+  // BUY  when histogram > 0 (MACD above signal line — bullish momentum)
+  // SELL when histogram < 0 (MACD below signal line — bearish momentum)
   const macdResult = macd(closes);
   if (macdResult) {
     const contribution = (macdResult.strength / 100) * WEIGHTS.macd;
@@ -129,109 +87,81 @@ function scorePair(symbol) {
     }
   }
 
-  // ── Bollinger Bands ───────────────────────────────────────────────────────
-  const bbResult = bollingerBands(closes, 20, 2);
-  if (bbResult) {
-    const contribution = (bbResult.strength / 100) * WEIGHTS.bollinger;
-    if (bbResult.signal === 'BUY') {
-      bullScore += contribution;
-      activeIndicators.push('Bollinger Bands');
-      notes.push(`Price below lower BB (${bbResult.lower.toFixed(5)})`);
-    } else if (bbResult.signal === 'SELL') {
-      bearScore += contribution;
-      activeIndicators.push('Bollinger Bands');
-      notes.push(`Price above upper BB (${bbResult.upper.toFixed(5)})`);
-    }
-  }
-
-  // ── Stochastic ────────────────────────────────────────────────────────────
+  // ── Stochastic Oscillator (14, 3) ─────────────────────────────────────────
+  // BUY  when %K ≤ 30 (oversold — price near recent lows, likely to bounce)
+  // SELL when %K ≥ 70 (overbought — price near recent highs, likely to drop)
   const stochResult = stochastic(highs, lows, closes, 14, 3);
   if (stochResult) {
     const k = stochResult.k;
-    if (k <= 25) {
-      const strength = Math.min(100, Math.round(((25 - k) / 25) * 100));
+    if (k <= 30) {
+      const strength = Math.min(100, Math.round(((30 - k) / 30) * 100));
       bullScore += (strength / 100) * WEIGHTS.stochastic;
       activeIndicators.push('Stochastic');
-      notes.push(`Stoch %K ${k} (oversold)`);
-    } else if (k >= 75) {
-      const strength = Math.min(100, Math.round(((k - 75) / 25) * 100));
+      notes.push(`Stoch %K ${k} / %D ${stochResult.d} (oversold)`);
+    } else if (k >= 70) {
+      const strength = Math.min(100, Math.round(((k - 70) / 30) * 100));
       bearScore += (strength / 100) * WEIGHTS.stochastic;
       activeIndicators.push('Stochastic');
-      notes.push(`Stoch %K ${k} (overbought)`);
+      notes.push(`Stoch %K ${k} / %D ${stochResult.d} (overbought)`);
+    } else {
+      // Neutral — small nudge toward the closer extreme
+      const nudge = ((50 - k) / 50) * WEIGHTS.stochastic * 0.3;
+      if (k < 50) bullScore += nudge;
+      else        bearScore += nudge;
     }
   }
 
-  // ── CCI ───────────────────────────────────────────────────────────────────
-  const cciResult = cci(highs, lows, closes, 20);
-  if (cciResult) {
-    const v = cciResult.value;
-    if (v <= -90) {
-      const strength = Math.min(100, Math.round(Math.abs(v + 90) / 1.5));
-      bullScore += (strength / 100) * WEIGHTS.cci;
-      activeIndicators.push('CCI');
-      notes.push(`CCI ${v} (oversold)`);
-    } else if (v >= 90) {
-      const strength = Math.min(100, Math.round((v - 90) / 1.5));
-      bearScore += (strength / 100) * WEIGHTS.cci;
-      activeIndicators.push('CCI');
-      notes.push(`CCI ${v} (overbought)`);
-    }
-  }
-
-  // ── EMA Crossover ─────────────────────────────────────────────────────────
-  const emaResult = emaCrossover(closes, 9, 21);
-  if (emaResult) {
-    const contribution = (emaResult.strength / 100) * WEIGHTS.emaCrossover;
-    if (emaResult.signal === 'BUY') {
+  // ── Bollinger Bands (20, 2σ) ──────────────────────────────────────────────
+  // BUY  when price touches / breaks below lower band (mean-reversion up)
+  // SELL when price touches / breaks above upper band (mean-reversion down)
+  // Also use %B position for a directional nudge in the neutral zone
+  const bbResult = bollingerBands(closes, 20, 2);
+  if (bbResult) {
+    if (bbResult.signal === 'BUY') {
+      const contribution = (bbResult.strength / 100) * WEIGHTS.bollinger;
       bullScore += contribution;
-      activeIndicators.push('EMA');
-      notes.push(`EMA9 > EMA21 (${emaResult.fast.toFixed(5)} > ${emaResult.slow.toFixed(5)})`);
-    } else if (emaResult.signal === 'SELL') {
+      activeIndicators.push('Bollinger Bands');
+      notes.push(`Price at lower BB (${bbResult.lower.toFixed(5)})`);
+    } else if (bbResult.signal === 'SELL') {
+      const contribution = (bbResult.strength / 100) * WEIGHTS.bollinger;
       bearScore += contribution;
-      activeIndicators.push('EMA');
-      notes.push(`EMA9 < EMA21 (${emaResult.fast.toFixed(5)} < ${emaResult.slow.toFixed(5)})`);
+      activeIndicators.push('Bollinger Bands');
+      notes.push(`Price at upper BB (${bbResult.upper.toFixed(5)})`);
+    } else {
+      // %B position: 0 = at lower band, 1 = at upper band, 0.5 = middle
+      const range = bbResult.upper - bbResult.lower;
+      const pctB  = range > 0 ? (currentPrice - bbResult.lower) / range : 0.5;
+      const nudge = Math.abs(pctB - 0.5) * WEIGHTS.bollinger * 0.4;
+      if (pctB < 0.5) bullScore += nudge; // closer to lower band → lean BUY
+      else            bearScore += nudge; // closer to upper band → lean SELL
+      notes.push(`BB mid (${bbResult.middle.toFixed(5)})`);
     }
   }
 
-  // ── ATR volatility filter ─────────────────────────────────────────────────
+  // ── ATR — block only extreme unpredictable volatility ────────────────────
   const atrValue = atr(highs, lows, closes, 14);
-  const currentPrice = closes[closes.length - 1];
-  const atrPct = atrValue ? (atrValue / currentPrice) * 100 : 0;
+  const atrPct   = atrValue ? (atrValue / currentPrice) * 100 : 0;
 
-  // Block only extreme conditions that make price completely unpredictable
   if (atrPct > 3.0) {
     return {
-      direction: 'BUY', score: 0, indicators: [], notes: 'Extreme volatility — no signal',
+      direction: 'BUY', score: 0, indicators: [],
+      notes: 'Extreme volatility — skipped',
       entryPrice: +currentPrice.toFixed(6), atrPct: +atrPct.toFixed(4),
     };
   }
 
-  const volatilityMultiplier = atrPct > 0.8 ? 0.85 : 1.0;
-
-  // ── Direction + indicator gate ────────────────────────────────────────────
+  // ── Final score ───────────────────────────────────────────────────────────
   const direction        = bullScore >= bearScore ? 'BUY' : 'SELL';
   const rawScore         = direction === 'BUY' ? bullScore : bearScore;
   const uniqueIndicators = [...new Set(activeIndicators)];
 
-  if (uniqueIndicators.length < MIN_INDICATORS) {
-    // At 50/50 mode, still emit — just use raw bull/bear comparison for direction
-    // score will be low but non-zero so it passes MIN_SCORE = 0
-  }
-
-  // At 50/50 mode trend alignment is not used as a filter
-  const trendMultiplier = 1.0;
-
-  // ── Trend confirmation (recent momentum) ─────────────────────────────────
-  const confirmMultiplier = trendConfirmation(closes, direction, 5);
-
-  // ── Confluence bonus ──────────────────────────────────────────────────────
-  const confluenceBonus = uniqueIndicators.length >= 5 ? 1.30
-                        : uniqueIndicators.length >= 4 ? 1.15
+  // Confluence bonus: more indicators agreeing = higher confidence
+  const confluenceBonus = uniqueIndicators.length >= 4 ? 1.20
+                        : uniqueIndicators.length >= 3 ? 1.10
+                        : uniqueIndicators.length >= 2 ? 1.05
                         : 1.0;
 
-  const score = Math.min(100, Math.round(
-    rawScore * volatilityMultiplier * trendMultiplier * confirmMultiplier * confluenceBonus
-  ));
+  const score = Math.min(100, Math.round(rawScore * confluenceBonus));
 
   return {
     direction,
@@ -248,8 +178,10 @@ function scorePair(symbol) {
 async function run() {
   const symbols = Object.keys(ASSETS);
 
+  // Advance all price series by one candle
   symbols.forEach((s) => tickCandle(s));
 
+  // Score every pair
   const results = symbols.map((symbol) => {
     try {
       return { symbol, ...scorePair(symbol) };
@@ -259,8 +191,8 @@ async function run() {
     }
   }).filter(Boolean);
 
+  // Pick the pair with the highest score
   results.sort((a, b) => b.score - a.score);
-
   const best = results[0];
 
   console.log('[Engine] Scores:', results.map((r) =>
@@ -268,10 +200,11 @@ async function run() {
   ).join(' | '));
 
   if (!best || best.score < MIN_SCORE) {
-    console.log(`[Engine] No signal strong enough (best: ${best?.score ?? 0} < ${MIN_SCORE})`);
+    console.log(`[Engine] No signal emitted`);
     return null;
   }
 
+  // Ensure system user exists
   let systemUser = await User.findOne({ email: 'system@expertsignals.ai' });
   if (!systemUser) {
     const bcrypt = require('bcryptjs');
@@ -284,6 +217,7 @@ async function run() {
     console.log('[Engine] Created system user');
   }
 
+  // Expire any still-pending/active signals for this pair
   await Signal.updateMany(
     { asset: best.symbol, status: { $in: ['pending', 'active'] } },
     { $set: { status: 'skipped' } }
@@ -310,7 +244,7 @@ async function run() {
   });
 
   console.log(
-    `[Engine] ✅ ${best.symbol} ${best.direction} ${timeframe} | score=${best.score} | indicators=[${best.indicators.join(',')}]`
+    `[Engine] ✅ ${best.symbol} ${best.direction} ${timeframe} | score=${best.score} | [${best.indicators.join(', ')}]`
   );
 
   return signal;
