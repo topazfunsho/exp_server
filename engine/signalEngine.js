@@ -20,8 +20,8 @@ const { rsi, macd, bollingerBands, stochastic, atr, cci, emaCrossover, ema } = r
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const MIN_SCORE           = 40;   // minimum composite score to emit
-const MIN_INDICATORS      = 3;    // minimum indicators that must agree
+const MIN_SCORE           = 0;    // no minimum — always emit the best available signal
+const MIN_INDICATORS      = 1;    // any single indicator is enough to determine direction
 const TIMEFRAME_OPTIONS   = ['3m', '4m'];
 const ENTRY_DELAY_SECS    = 60;
 const TRADE_DURATION_SECS = 3 * 60;
@@ -198,10 +198,10 @@ function scorePair(symbol) {
   const currentPrice = closes[closes.length - 1];
   const atrPct = atrValue ? (atrValue / currentPrice) * 100 : 0;
 
-  // Block flat markets and news spikes
-  if (atrPct < 0.002 || atrPct > 2.0) {
+  // Block only extreme conditions that make price completely unpredictable
+  if (atrPct > 3.0) {
     return {
-      direction: 'BUY', score: 0, indicators: [], notes: 'ATR filter blocked',
+      direction: 'BUY', score: 0, indicators: [], notes: 'Extreme volatility — no signal',
       entryPrice: +currentPrice.toFixed(6), atrPct: +atrPct.toFixed(4),
     };
   }
@@ -214,17 +214,12 @@ function scorePair(symbol) {
   const uniqueIndicators = [...new Set(activeIndicators)];
 
   if (uniqueIndicators.length < MIN_INDICATORS) {
-    return {
-      direction, score: 0, indicators: uniqueIndicators,
-      notes: `Only ${uniqueIndicators.length} indicators agree`,
-      entryPrice: +currentPrice.toFixed(6), atrPct: +atrPct.toFixed(4),
-    };
+    // At 50/50 mode, still emit — just use raw bull/bear comparison for direction
+    // score will be low but non-zero so it passes MIN_SCORE = 0
   }
 
-  // ── Trend alignment check ─────────────────────────────────────────────────
-  // Counter-trend signals lose far more often — penalise them heavily
-  const trendAligned = isTrendAligned(closes, direction);
-  const trendMultiplier = trendAligned ? 1.0 : 0.4;
+  // At 50/50 mode trend alignment is not used as a filter
+  const trendMultiplier = 1.0;
 
   // ── Trend confirmation (recent momentum) ─────────────────────────────────
   const confirmMultiplier = trendConfirmation(closes, direction, 5);
@@ -238,9 +233,6 @@ function scorePair(symbol) {
     rawScore * volatilityMultiplier * trendMultiplier * confirmMultiplier * confluenceBonus
   ));
 
-  // Add trend alignment note
-  if (!trendAligned) notes.push('⚠ Counter-trend');
-
   return {
     direction,
     score,
@@ -248,7 +240,6 @@ function scorePair(symbol) {
     notes: notes.join(' | '),
     entryPrice: +currentPrice.toFixed(6),
     atrPct: +atrPct.toFixed(4),
-    trendAligned,
   };
 }
 
@@ -273,7 +264,7 @@ async function run() {
   const best = results[0];
 
   console.log('[Engine] Scores:', results.map((r) =>
-    `${r.symbol}:${r.score}(${r.direction}${r.trendAligned === false ? '⚠' : ''})`
+    `${r.symbol}:${r.score}(${r.direction})`
   ).join(' | '));
 
   if (!best || best.score < MIN_SCORE) {
@@ -319,7 +310,7 @@ async function run() {
   });
 
   console.log(
-    `[Engine] ✅ ${best.symbol} ${best.direction} ${timeframe} | score=${best.score} | trend=${best.trendAligned ? '✓' : '✗'} | indicators=[${best.indicators.join(',')}]`
+    `[Engine] ✅ ${best.symbol} ${best.direction} ${timeframe} | score=${best.score} | indicators=[${best.indicators.join(',')}]`
   );
 
   return signal;
