@@ -21,10 +21,14 @@ const { rsi, macd, bollingerBands, stochastic, atr } = require('./indicators');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const MIN_SCORE           = 0;       // always emit — 50/50 mode
+const MIN_SCORE           = 20;     // medium — emit when best pair clears 20
 const TIMEFRAME_OPTIONS   = ['3m', '4m'];
-const ENTRY_DELAY_SECS    = 60;      // 1 min prep window before entry
-const TRADE_DURATION_SECS = 3 * 60; // 3-min trade window
+const ENTRY_DELAY_SECS    = 60;
+const TRADE_DURATION_SECS = 3 * 60;
+
+// Base score added so even 1–2 agreeing indicators produce a visible
+// medium-range confidence (35–55) rather than near-zero values
+const BASE_SCORE = 30;
 
 // Equal weight across all four indicators (sum = 100)
 const WEIGHTS = {
@@ -52,7 +56,6 @@ function scorePair(symbol) {
   if (rsiResult) {
     const v = rsiResult.value;
     if (v <= 40) {
-      // Strength scales: RSI 40 → 0%, RSI 0 → 100%
       const strength = Math.min(100, Math.round(((40 - v) / 40) * 100));
       bullScore += (strength / 100) * WEIGHTS.rsi;
       activeIndicators.push('RSI');
@@ -104,7 +107,6 @@ function scorePair(symbol) {
       activeIndicators.push('Stochastic');
       notes.push(`Stoch %K ${k} / %D ${stochResult.d} (overbought)`);
     } else {
-      // Neutral — small nudge toward the closer extreme
       const nudge = ((50 - k) / 50) * WEIGHTS.stochastic * 0.3;
       if (k < 50) bullScore += nudge;
       else        bearScore += nudge;
@@ -138,7 +140,7 @@ function scorePair(symbol) {
     }
   }
 
-  // ── ATR — block only extreme unpredictable volatility ────────────────────
+  // ── ATR — calm markets get a mild penalty, extreme volatility blocked ────
   const atrValue = atr(highs, lows, closes, 14);
   const atrPct   = atrValue ? (atrValue / currentPrice) * 100 : 0;
 
@@ -149,6 +151,9 @@ function scorePair(symbol) {
       entryPrice: +currentPrice.toFixed(6), atrPct: +atrPct.toFixed(4),
     };
   }
+
+  // Raised floor: calm markets (low ATR) get 0.85x, not blocked entirely
+  const volatilityMultiplier = atrPct < 0.005 ? 0.85 : atrPct > 1.0 ? 0.90 : 1.0;
 
   // ── Final score ───────────────────────────────────────────────────────────
   const direction        = bullScore >= bearScore ? 'BUY' : 'SELL';
@@ -161,7 +166,7 @@ function scorePair(symbol) {
                         : uniqueIndicators.length >= 2 ? 1.05
                         : 1.0;
 
-  const score = Math.min(100, Math.round(rawScore * confluenceBonus));
+  const score = Math.min(100, Math.round(BASE_SCORE + rawScore * volatilityMultiplier * confluenceBonus));
 
   return {
     direction,
