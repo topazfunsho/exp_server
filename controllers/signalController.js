@@ -50,26 +50,72 @@ exports.createSignal = async (req, res) => {
 
 /**
  * GET /api/signals
- * Protected — paginated list, skipped/cancelled excluded by default.
- * Each signal is returned with the requesting user's personal status overlaid.
+ * Protected — paginated list, skipped/cancelled/expired excluded by default.
+ *
+ * ?mine=true  — only return signals this user has a UserSignal record for,
+ *               and count only those for the `total` field.
+ *               This makes the "All Signals" page unique per user.
  */
 exports.getSignals = async (req, res) => {
   try {
-    const { status, asset, generatedBy, limit = 20, page = 1 } = req.query;
-
-    const filter = {};
-    if (status) {
-      filter.status = status;
-    } else {
-      // Default: exclude skipped, cancelled, and expired signals
-      filter.status = { $nin: ['skipped', 'cancelled', 'expired'] };
-    }
-    if (asset)       filter.asset       = new RegExp(asset, 'i');
-    if (generatedBy) filter.generatedBy = generatedBy;
+    const { status, asset, generatedBy, mine, limit = 20, page = 1 } = req.query;
 
     const pageNum  = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip     = (pageNum - 1) * limitNum;
+
+    // ── mine=true: scope to this user's acted-on signals only ────────────────
+    if (mine === 'true') {
+      // Get all signal IDs this user has interacted with (any status)
+      const userRecordIds = await UserSignal.find(
+        { user: req.user._id },
+        { signal: 1 }
+      ).lean();
+
+      const mySignalIds = userRecordIds.map((r) => r.signal);
+
+      const filter = { _id: { $in: mySignalIds } };
+      if (status)      filter.status      = status;
+      if (asset)       filter.asset       = new RegExp(asset, 'i');
+      if (generatedBy) filter.generatedBy = generatedBy;
+
+      const [signals, total] = await Promise.all([
+        Signal.find(filter)
+          .populate('createdBy', 'name email')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        Signal.countDocuments(filter),
+      ]);
+
+      // Overlay user records
+      const userRecords = await UserSignal.find({
+        user:   req.user._id,
+        signal: { $in: signals.map((s) => s._id) },
+      }).lean();
+
+      const userSignalMap = new Map(
+        userRecords.map((r) => [r.signal.toString(), r])
+      );
+
+      return res.json({
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum),
+        signals: signals.map((s) => overlayUserRecord(s, userSignalMap)),
+      });
+    }
+
+    // ── Default: all signals (admin / general view) ───────────────────────────
+    const filter = {};
+    if (status) {
+      filter.status = status;
+    } else {
+      filter.status = { $nin: ['skipped', 'cancelled', 'expired'] };
+    }
+    if (asset)       filter.asset       = new RegExp(asset, 'i');
+    if (generatedBy) filter.generatedBy = generatedBy;
 
     const [signals, total] = await Promise.all([
       Signal.find(filter)
@@ -81,7 +127,6 @@ exports.getSignals = async (req, res) => {
       Signal.countDocuments(filter),
     ]);
 
-    // Fetch this user's UserSignal records for the returned signals
     const signalIds = signals.map((s) => s._id);
     const userRecords = await UserSignal.find({
       user:   req.user._id,
