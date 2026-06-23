@@ -16,11 +16,7 @@
 'use strict';
 
 const ASSETS = {
-  'EUR/USD': { basePrice: 1.0850, volatility: 0.0008 },  // ~85% payout, highest liquidity
-  'GBP/USD': { basePrice: 1.2700, volatility: 0.0010 },  // ~84% payout, strong trends
-  'USD/JPY': { basePrice: 149.50, volatility: 0.0009 },  // ~83% payout, clean technicals
-  'BTC/USD': { basePrice: 67000,  volatility: 0.0200 },  // ~90% payout, high volatility = big moves
-  'XAU/USD': { basePrice: 2350,   volatility: 0.0060 },  // ~88% payout, safe-haven momentum
+  'EUR/USD': { basePrice: 1.0850, volatility: 0.0008 },
 };
 
 const priceState = {};
