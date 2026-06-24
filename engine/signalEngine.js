@@ -21,10 +21,10 @@ const { rsi, macd, bollingerBands, stochastic, atr } = require('./indicators');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const MIN_SCORE           = 20;     // medium — emit when best pair clears 20
-const TIMEFRAME_OPTIONS   = ['3m', '4m'];
-const ENTRY_DELAY_SECS    = 60;
-const TRADE_DURATION_SECS = 3 * 60;
+const MIN_SCORE           = 20;
+const SIGNAL_TIMEFRAME    = '3m';           // fixed 3-minute candle timeframe
+const ENTRY_DELAY_SECS    = 0;              // signal starts at candle open — no delay
+const TRADE_DURATION_SECS = 3 * 60;        // 3-minute trade window
 
 // Base score added so even 1–2 agreeing indicators produce a visible
 // medium-range confidence (35–55) rather than near-zero values
@@ -228,28 +228,29 @@ async function run() {
     { $set: { status: 'skipped' } }
   );
 
+  // entryTime = right now (start of new candle)
+  // expiryTime = now + 3 minutes (end of candle)
   const now        = Date.now();
-  const entryTime  = new Date(now + ENTRY_DELAY_SECS * 1000);
-  const expiryTime = new Date(now + ENTRY_DELAY_SECS * 1000 + TRADE_DURATION_SECS * 1000);
-  const timeframe  = TIMEFRAME_OPTIONS[Math.floor(Math.random() * TIMEFRAME_OPTIONS.length)];
+  const entryTime  = new Date(now);
+  const expiryTime = new Date(now + TRADE_DURATION_SECS * 1000);
 
   const signal = await Signal.create({
     asset:       best.symbol,
     direction:   best.direction,
-    timeframe,
+    timeframe:   SIGNAL_TIMEFRAME,
     entryPrice:  best.entryPrice,
     entryTime,
     expiryTime,
     confidence:  best.score,
     indicators:  best.indicators,
     notes:       best.notes,
-    status:      'pending',
+    status:      'active',     // active immediately — no pending window
     createdBy:   systemUser._id,
     generatedBy: 'engine',
   });
 
   console.log(
-    `[Engine] ✅ ${best.symbol} ${best.direction} ${timeframe} | score=${best.score} | [${best.indicators.join(', ')}]`
+    `[Engine] ✅ ${best.symbol} ${best.direction} ${SIGNAL_TIMEFRAME} | score=${best.score} | expires ${expiryTime.toISOString()} | [${best.indicators.join(', ')}]`
   );
 
   return signal;

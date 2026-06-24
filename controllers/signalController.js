@@ -150,15 +150,13 @@ exports.getSignals = async (req, res) => {
 
 /**
  * GET /api/signals/live
- * Protected — pending + active signals with the user's personal status overlaid.
+ * Protected — active signals only (signals start immediately, no pending state).
  */
 exports.getLiveSignals = async (req, res) => {
   try {
-    const signals = await Signal.find({
-      status: { $in: ['pending', 'active'] },
-    })
+    const signals = await Signal.find({ status: 'active' })
       .populate('createdBy', 'name')
-      .sort({ entryTime: 1 })
+      .sort({ entryTime: -1 })
       .lean();
 
     const signalIds = signals.map((s) => s._id);
@@ -172,7 +170,6 @@ exports.getLiveSignals = async (req, res) => {
     );
 
     const overlaid = signals.map((s) => overlayUserRecord(s, userSignalMap));
-
     res.json({ count: overlaid.length, signals: overlaid });
   } catch (err) {
     res.status(500).json({ message: err.message });
