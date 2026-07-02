@@ -186,10 +186,17 @@ async function run() {
     confidence:  best.score,
     indicators:  best.indicators,
     notes:       best.notes,
-    status:      'pending',    // pending for 10s, then transitions to active
+    status:      'pending',
     createdBy:   systemUser._id,
     generatedBy: 'engine',
   });
+
+  // Push the new signal to all connected dashboard clients immediately
+  const app = require('../app');
+  if (app.locals.broadcastSignal) {
+    const populated = await Signal.findById(signal._id).populate('createdBy', 'name').lean();
+    app.locals.broadcastSignal(populated);
+  }
 
   console.log(
     `[Engine] ✅ ${best.symbol} ${best.direction} ${SIGNAL_TIMEFRAME} | score=${best.score} | entry in ${PREP_SECS}s | [${best.indicators.join(', ')}]`

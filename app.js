@@ -1,8 +1,9 @@
 const express = require('express');
-const cors = require('cors');
+const cors    = require('cors');
 
-const authRoutes = require('./routes/authRoutes');
+const authRoutes   = require('./routes/authRoutes');
 const signalRoutes = require('./routes/signalRoutes');
+const { protect }  = require('./middleware/authMiddleware');
 
 const app = express();
 
@@ -11,7 +12,7 @@ app.use(cors());
 app.use(express.json());
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/api/auth', authRoutes);
+app.use('/api/auth',    authRoutes);
 app.use('/api/signals', signalRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
@@ -20,52 +21,63 @@ app.get('/api/health', (req, res) => {
 });
 
 // ── SSE — real-time signal push ───────────────────────────────────────────────
-// Clients connect once; the server pushes a 'signal' event the moment a new
-// signal is saved by the engine. No polling needed on the frontend.
+// Each authenticated client holds an open connection.
+// The moment the engine saves a new signal, broadcastSignal() pushes it to
+// every connected client instantly — no polling needed on the frontend.
 
 const sseClients = new Set();
 
-// Expose broadcaster so the engine can call it after Signal.create()
+/**
+ * Called by the signal engine immediately after Signal.create().
+ * Sends the full signal document to every connected dashboard client.
+ */
 app.locals.broadcastSignal = (signal) => {
-  const data = JSON.stringify(signal);
-  for (const res of sseClients) {
-    try { res.write(`event: signal\ndata: ${data}\n\n`); } catch { sseClients.delete(res); }
+  if (sseClients.size === 0) return;
+  const payload = `event: signal\ndata: ${JSON.stringify(signal)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
   }
+  console.log(`[SSE] Broadcast to ${sseClients.size} client(s)`);
 };
 
 app.get('/api/signals/stream', protect, (req, res) => {
-  res.setHeader('Content-Type',  'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection',    'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx buffering
+  res.setHeader('Content-Type',      'text/event-stream');
+  res.setHeader('Cache-Control',     'no-cache');
+  res.setHeader('Connection',        'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx/proxy buffering
   res.flushHeaders();
 
-  // Send a heartbeat every 25s to keep the connection alive
+  // Heartbeat every 20s to keep NAT/proxy connections alive
   const heartbeat = setInterval(() => {
     try { res.write(': heartbeat\n\n'); } catch { clearInterval(heartbeat); }
-  }, 25_000);
+  }, 20_000);
 
   sseClients.add(res);
+  console.log(`[SSE] Client connected (total: ${sseClients.size})`);
 
   req.on('close', () => {
     clearInterval(heartbeat);
     sseClients.delete(res);
+    console.log(`[SSE] Client disconnected (total: ${sseClients.size})`);
   });
 });
+
+// ── Engine status ─────────────────────────────────────────────────────────────
 app.get('/api/engine/status', async (req, res) => {
   try {
-    const Signal = require('./models/Signal');
+    const Signal      = require('./models/Signal');
     const { isPaused } = require('./engine/scheduler');
     const latest = await Signal.findOne({ generatedBy: 'engine' })
       .sort({ createdAt: -1 })
       .populate('createdBy', 'name');
 
-    const now = Date.now();
-    const nextFireMs = 60_000 - (now % 60_000);
-
     res.json({
-      status: isPaused() ? 'paused' : 'running',
-      nextSignalIn: isPaused() ? 'paused' : `${Math.round(nextFireMs / 1000)}s`,
+      status:       isPaused() ? 'paused' : 'running',
+      nextSignalIn: isPaused() ? 'paused' : 'on next qualifying setup',
       latestSignal: latest || null,
     });
   } catch (err) {
@@ -73,9 +85,7 @@ app.get('/api/engine/status', async (req, res) => {
   }
 });
 
-// ── Engine pause / resume and SSE auth ───────────────────────────────────────
-const { protect } = require('./middleware/authMiddleware');
-
+// ── Engine pause / resume ─────────────────────────────────────────────────────
 app.post('/api/engine/pause', protect, (req, res) => {
   const { pause } = require('./engine/scheduler');
   pause();
