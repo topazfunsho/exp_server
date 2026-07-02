@@ -169,15 +169,9 @@ async function run() {
     console.log('[Engine] Created system user');
   }
 
-  // Expire any still-pending/active signals for this pair
-  await Signal.updateMany(
-    { asset: best.symbol, status: { $in: ['pending', 'active'] } },
-    { $set: { status: 'skipped' } }
-  );
+  // Do NOT expire previous signals — let them all stay on the dashboard
+  // until the user acts on each one individually.
 
-  // Signal sent PREP_SECS (10s) before the candle opens so user can prepare.
-  // entryTime = when the candle starts (user enters the trade)
-  // expiryTime = entryTime + 3 minutes (candle closes)
   const now        = Date.now();
   const entryTime  = new Date(now + PREP_SECS * 1000);
   const expiryTime = new Date(now + PREP_SECS * 1000 + TRADE_DURATION_SECS * 1000);

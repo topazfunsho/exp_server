@@ -1,21 +1,21 @@
 /**
- * Signal Scheduler — candle-aligned, no fixed intervals
+ * Signal Scheduler
  *
- * Timing model:
- *   1. Engine runs → creates signal with:
- *        status    = 'pending'
- *        entryTime = now + 10s   (user has 10s to prepare)
- *        expiryTime = entryTime + 3min  (candle closes)
- *   2. After 10s: lifecycle checker transitions signal pending → active
- *   3. Scheduler waits until expiryTime, then immediately runs engine again
+ * Runs the engine every 15 seconds continuously.
+ * When the three-condition gate (Stochastic + RSI + MACD) fires, a new
+ * signal is created and pushed to the dashboard immediately — without
+ * waiting for previous signals to expire first.
  *
- * If the engine finds no high-confidence setup, it retries in 10s.
+ * Multiple signals can be live on the dashboard at the same time.
  */
 
 'use strict';
 
 const Signal = require('../models/Signal');
 const { run, TRADE_DURATION_SECS } = require('./signalEngine');
+
+// How often to check for a new signal (seconds)
+const CHECK_INTERVAL_SECS = 15;
 
 let schedulerTimer = null;
 let lifecycleTimer = null;
@@ -28,50 +28,38 @@ async function tick() {
   if (isRunning || paused) return;
   isRunning = true;
 
-  let nextDelayMs = 10_000; // retry in 10s if no signal emitted
-
   try {
     const signal = await run();
-
     if (signal) {
-      // Wait until this candle expires, then fire next signal immediately
-      const msUntilExpiry = new Date(signal.expiryTime).getTime() - Date.now();
-      nextDelayMs = Math.max(0, msUntilExpiry);
-      console.log(
-        `[Scheduler] Next signal after candle closes in ${Math.round(nextDelayMs / 1000)}s ` +
-        `(${new Date(signal.expiryTime).toLocaleTimeString()})`
-      );
-    } else {
-      console.log('[Scheduler] No qualifying signal — retrying in 10s');
+      console.log(`[Scheduler] New signal emitted — ${signal.asset} ${signal.direction}`);
     }
   } catch (err) {
     console.error('[Scheduler] Engine error:', err.message);
   } finally {
     isRunning = false;
     if (!paused) {
-      schedulerTimer = setTimeout(tick, nextDelayMs);
+      // Always retry after CHECK_INTERVAL_SECS — never wait for candle expiry
+      schedulerTimer = setTimeout(tick, CHECK_INTERVAL_SECS * 1000);
     }
   }
 }
 
 // ── Lifecycle manager — runs every 5 seconds ──────────────────────────────────
-// 1. pending → active  when entryTime is reached (10s after signal creation)
-// 2. active  → skipped when expiryTime passes with no user result
 
 async function expireStaleSignals() {
   try {
     const now = new Date();
 
-    // Activate signals whose 10s prep window has elapsed
+    // pending → active when prep window (10s) has elapsed
     const activated = await Signal.updateMany(
       { status: 'pending', entryTime: { $lte: now } },
       { $set: { status: 'active' } }
     );
     if (activated.modifiedCount > 0) {
-      console.log(`[Scheduler] Activated ${activated.modifiedCount} signal(s) — entry time reached`);
+      console.log(`[Scheduler] Activated ${activated.modifiedCount} signal(s)`);
     }
 
-    // Skip signals whose candle has closed with no user result
+    // active → skipped when candle closes with no user result
     const skipped = await Signal.updateMany(
       { status: 'active', expiryTime: { $lte: now }, result: null },
       { $set: { status: 'skipped' } }
@@ -113,21 +101,8 @@ function pause() {
 function resume() {
   if (!paused) return;
   paused = false;
-
-  // If there's an active signal, wait for it to expire before firing next
-  Signal.findOne({ status: { $in: ['pending', 'active'] }, generatedBy: 'engine' })
-    .sort({ expiryTime: -1 })
-    .then((latest) => {
-      if (latest) {
-        const delay = Math.max(0, new Date(latest.expiryTime).getTime() - Date.now());
-        console.log(`[Scheduler] Resumed — waiting ${Math.round(delay / 1000)}s for current candle to close`);
-        schedulerTimer = setTimeout(tick, delay);
-      } else {
-        console.log('[Scheduler] Resumed — firing immediately');
-        schedulerTimer = setTimeout(tick, 0);
-      }
-    })
-    .catch(() => { schedulerTimer = setTimeout(tick, 0); });
+  console.log('[Scheduler] Resumed — firing immediately');
+  schedulerTimer = setTimeout(tick, 0);
 }
 
 function stop() {
