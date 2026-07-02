@@ -19,7 +19,39 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ── Engine status ─────────────────────────────────────────────────────────────
+// ── SSE — real-time signal push ───────────────────────────────────────────────
+// Clients connect once; the server pushes a 'signal' event the moment a new
+// signal is saved by the engine. No polling needed on the frontend.
+
+const sseClients = new Set();
+
+// Expose broadcaster so the engine can call it after Signal.create()
+app.locals.broadcastSignal = (signal) => {
+  const data = JSON.stringify(signal);
+  for (const res of sseClients) {
+    try { res.write(`event: signal\ndata: ${data}\n\n`); } catch { sseClients.delete(res); }
+  }
+};
+
+app.get('/api/signals/stream', protect, (req, res) => {
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable Nginx buffering
+  res.flushHeaders();
+
+  // Send a heartbeat every 25s to keep the connection alive
+  const heartbeat = setInterval(() => {
+    try { res.write(': heartbeat\n\n'); } catch { clearInterval(heartbeat); }
+  }, 25_000);
+
+  sseClients.add(res);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
 app.get('/api/engine/status', async (req, res) => {
   try {
     const Signal = require('./models/Signal');
@@ -41,7 +73,7 @@ app.get('/api/engine/status', async (req, res) => {
   }
 });
 
-// ── Engine pause / resume (protected — any logged-in user) ────────────────────
+// ── Engine pause / resume and SSE auth ───────────────────────────────────────
 const { protect } = require('./middleware/authMiddleware');
 
 app.post('/api/engine/pause', protect, (req, res) => {

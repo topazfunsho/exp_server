@@ -1,15 +1,15 @@
 /**
- * Signal Scheduler
+ * Signal Scheduler — candle-aligned, no fixed intervals
  *
- * Timing model — candle-aligned, no fixed intervals:
- *   1. Engine runs → emits signal with entryTime=now, expiryTime=now+3min
- *   2. Scheduler waits exactly until expiryTime (the candle closes)
- *   3. Engine runs again immediately at the start of the new candle
+ * Timing model:
+ *   1. Engine runs → creates signal with:
+ *        status    = 'pending'
+ *        entryTime = now + 10s   (user has 10s to prepare)
+ *        expiryTime = entryTime + 3min  (candle closes)
+ *   2. After 10s: lifecycle checker transitions signal pending → active
+ *   3. Scheduler waits until expiryTime, then immediately runs engine again
  *
- * This means signals are back-to-back: next signal starts the moment
- * the previous candle expires, with no gap or cooldown.
- *
- * If the engine emits no signal (score too low), retry after 10 seconds.
+ * If the engine finds no high-confidence setup, it retries in 10s.
  */
 
 'use strict';
@@ -28,21 +28,21 @@ async function tick() {
   if (isRunning || paused) return;
   isRunning = true;
 
-  let nextDelayMs = 10_000; // fallback: retry in 10s if no signal was emitted
+  let nextDelayMs = 10_000; // retry in 10s if no signal emitted
 
   try {
     const signal = await run();
 
     if (signal) {
-      // Wait until this signal's candle expires, then start the next one
+      // Wait until this candle expires, then fire next signal immediately
       const msUntilExpiry = new Date(signal.expiryTime).getTime() - Date.now();
       nextDelayMs = Math.max(0, msUntilExpiry);
       console.log(
-        `[Scheduler] Next signal in ${Math.round(nextDelayMs / 1000)}s ` +
-        `(candle closes at ${new Date(signal.expiryTime).toLocaleTimeString()})`
+        `[Scheduler] Next signal after candle closes in ${Math.round(nextDelayMs / 1000)}s ` +
+        `(${new Date(signal.expiryTime).toLocaleTimeString()})`
       );
     } else {
-      console.log('[Scheduler] No signal emitted — retrying in 10s');
+      console.log('[Scheduler] No qualifying signal — retrying in 10s');
     }
   } catch (err) {
     console.error('[Scheduler] Engine error:', err.message);
@@ -54,33 +54,34 @@ async function tick() {
   }
 }
 
-// ── Lifecycle manager ─────────────────────────────────────────────────────────
-// Transitions: active → skipped when expiryTime passes with no result.
-// pending → active is no longer needed (signals start as 'active' immediately).
+// ── Lifecycle manager — runs every 5 seconds ──────────────────────────────────
+// 1. pending → active  when entryTime is reached (10s after signal creation)
+// 2. active  → skipped when expiryTime passes with no user result
 
-async function expireStaleSignals() {
 async function expireStaleSignals() {
   try {
     const now = new Date();
 
-    // Expire active signals whose candle has closed with no result
+    // Activate signals whose 10s prep window has elapsed
+    const activated = await Signal.updateMany(
+      { status: 'pending', entryTime: { $lte: now } },
+      { $set: { status: 'active' } }
+    );
+    if (activated.modifiedCount > 0) {
+      console.log(`[Scheduler] Activated ${activated.modifiedCount} signal(s) — entry time reached`);
+    }
+
+    // Skip signals whose candle has closed with no user result
     const skipped = await Signal.updateMany(
       { status: 'active', expiryTime: { $lte: now }, result: null },
       { $set: { status: 'skipped' } }
     );
     if (skipped.modifiedCount > 0) {
-      console.log(`[Scheduler] Expired ${skipped.modifiedCount} unacted signal(s)`);
+      console.log(`[Scheduler] Skipped ${skipped.modifiedCount} unacted signal(s)`);
     }
-
-    // Also expire any legacy pending signals
-    await Signal.updateMany(
-      { status: 'pending', expiryTime: { $lte: now } },
-      { $set: { status: 'skipped' } }
-    );
   } catch (err) {
     console.error('[Scheduler] Lifecycle error:', err.message);
   }
-}
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -92,13 +93,13 @@ function start() {
   }
 
   paused = false;
-  console.log(`[Scheduler] Starting — candle-aligned mode (${TRADE_DURATION_SECS}s per candle)`);
+  console.log(`[Scheduler] Starting — 10s prep + ${TRADE_DURATION_SECS}s candle`);
 
-  // Fire immediately at startup
+  // Fire immediately on startup
   schedulerTimer = setTimeout(tick, 0);
 
-  // Lifecycle checker every 15 seconds
-  lifecycleTimer = setInterval(expireStaleSignals, 15_000);
+  // Lifecycle checker every 5 seconds (catches the 10s pending→active transition)
+  lifecycleTimer = setInterval(expireStaleSignals, 5_000);
   expireStaleSignals();
 }
 
@@ -113,23 +114,20 @@ function resume() {
   if (!paused) return;
   paused = false;
 
-  // Check if there's a currently active signal we should wait for
-  Signal.findOne({ status: 'active', generatedBy: 'engine' })
+  // If there's an active signal, wait for it to expire before firing next
+  Signal.findOne({ status: { $in: ['pending', 'active'] }, generatedBy: 'engine' })
     .sort({ expiryTime: -1 })
     .then((latest) => {
       if (latest) {
-        const msUntilExpiry = new Date(latest.expiryTime).getTime() - Date.now();
-        const delay = Math.max(0, msUntilExpiry);
+        const delay = Math.max(0, new Date(latest.expiryTime).getTime() - Date.now());
         console.log(`[Scheduler] Resumed — waiting ${Math.round(delay / 1000)}s for current candle to close`);
         schedulerTimer = setTimeout(tick, delay);
       } else {
-        console.log('[Scheduler] Resumed — no active signal, firing immediately');
+        console.log('[Scheduler] Resumed — firing immediately');
         schedulerTimer = setTimeout(tick, 0);
       }
     })
-    .catch(() => {
-      schedulerTimer = setTimeout(tick, 0);
-    });
+    .catch(() => { schedulerTimer = setTimeout(tick, 0); });
 }
 
 function stop() {
