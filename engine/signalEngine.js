@@ -3,26 +3,23 @@
 /**
  * Signal Engine
  *
- * Three-condition signal rule — ALL THREE must agree before a signal is sent:
+ * Signal is sent when at least 2 of the 3 indicators agree on direction:
+ *   - Stochastic %K: oversold <20 → BUY, overbought >80 → SELL
+ *   - RSI:           oversold <30 → BUY, overbought >70 → SELL
+ *   - MACD histogram: positive  → BUY, negative         → SELL
  *
- *   1. Stochastic %K crosses above 80 (SELL) or below 20 (BUY)
- *   2. RSI crosses above 70 (SELL) or below 30 (BUY)
- *   3. MACD histogram confirms the same direction (positive = BUY, negative = SELL)
- *
- * If any one of the three disagrees → no signal.
- * This is the most accurate combination for binary options on short timeframes.
+ * Any combination of 2 or all 3 agreeing triggers a signal.
+ * Confidence score reflects how many agree and how extreme their readings are.
  */
 
 const Signal = require('../models/Signal');
 const User   = require('../models/User');
 const { fetchCandles, tickCandle, ASSETS } = require('./priceSimulator');
-const { rsi, macd, stochastic, atr } = require('./indicators');
-
-// ── Config ────────────────────────────────────────────────────────────────────
+const { rsi, macd, stochastic, atr, bollingerBands } = require('./indicators');
 
 const SIGNAL_TIMEFRAME    = '3m';
-const PREP_SECS           = 10;       // signal sent 10s before candle opens
-const TRADE_DURATION_SECS = 3 * 60;  // 3-minute candle/trade window
+const PREP_SECS           = 10;
+const TRADE_DURATION_SECS = 3 * 60;
 const ENTRY_DELAY_SECS    = PREP_SECS;
 
 // ── Scoring ───────────────────────────────────────────────────────────────────
@@ -31,99 +28,80 @@ function scorePair(symbol) {
   const { highs, lows, closes } = fetchCandles(symbol, 200);
   const currentPrice = closes[closes.length - 1];
 
-  // ── 1. Stochastic %K — must be in extreme zone ────────────────────────────
+  const votes   = [];  // { dir: 'BUY'|'SELL', strength: 0-100, label: string, note: string }
+
+  // ── 1. Stochastic %K ──────────────────────────────────────────────────────
   const stochResult = stochastic(highs, lows, closes, 14, 3);
-  if (!stochResult) return { direction: 'BUY', score: 0, indicators: [], notes: 'Stochastic N/A', entryPrice: +currentPrice.toFixed(6) };
-
-  const k = stochResult.k;
-  let stochDir = null;
-  let stochStrength = 0;
-
-  if (k <= 20) {
-    stochDir = 'BUY';
-    stochStrength = Math.min(100, Math.round(((20 - k) / 20) * 100));
-  } else if (k >= 80) {
-    stochDir = 'SELL';
-    stochStrength = Math.min(100, Math.round(((k - 80) / 20) * 100));
+  if (stochResult) {
+    const k = stochResult.k;
+    if (k <= 20) {
+      votes.push({ dir: 'BUY',  strength: Math.min(100, Math.round(((20 - k) / 20) * 100)), label: 'Stochastic', note: `Stoch %K ${k.toFixed(1)} / %D ${stochResult.d.toFixed(1)} (oversold <20)` });
+    } else if (k >= 80) {
+      votes.push({ dir: 'SELL', strength: Math.min(100, Math.round(((k - 80) / 20) * 100)), label: 'Stochastic', note: `Stoch %K ${k.toFixed(1)} / %D ${stochResult.d.toFixed(1)} (overbought >80)` });
+    }
   }
 
-  // Stochastic not in extreme zone — no signal
-  if (!stochDir) {
-    return { direction: 'BUY', score: 0, indicators: [], notes: `Stoch %K ${k.toFixed(1)} not in extreme zone (<20 or >80)`, entryPrice: +currentPrice.toFixed(6) };
-  }
-
-  // ── 2. RSI — must be in extreme zone AND agree with Stochastic ───────────
+  // ── 2. RSI ────────────────────────────────────────────────────────────────
   const rsiResult = rsi(closes, 14);
-  if (!rsiResult) return { direction: 'BUY', score: 0, indicators: [], notes: 'RSI N/A', entryPrice: +currentPrice.toFixed(6) };
-
-  const rsiVal = rsiResult.value;
-  let rsiDir = null;
-  let rsiStrength = 0;
-
-  if (rsiVal <= 30) {
-    rsiDir = 'BUY';
-    rsiStrength = Math.min(100, Math.round(((30 - rsiVal) / 30) * 100));
-  } else if (rsiVal >= 70) {
-    rsiDir = 'SELL';
-    rsiStrength = Math.min(100, Math.round(((rsiVal - 70) / 30) * 100));
+  if (rsiResult) {
+    const v = rsiResult.value;
+    if (v <= 30) {
+      votes.push({ dir: 'BUY',  strength: Math.min(100, Math.round(((30 - v) / 30) * 100)), label: 'RSI', note: `RSI ${v.toFixed(1)} (oversold <30)` });
+    } else if (v >= 70) {
+      votes.push({ dir: 'SELL', strength: Math.min(100, Math.round(((v - 70) / 30) * 100)), label: 'RSI', note: `RSI ${v.toFixed(1)} (overbought >70)` });
+    }
   }
 
-  // RSI not in extreme zone — no signal
-  if (!rsiDir) {
-    return { direction: 'BUY', score: 0, indicators: [], notes: `RSI ${rsiVal.toFixed(1)} not in extreme zone (<30 or >70)`, entryPrice: +currentPrice.toFixed(6) };
-  }
-
-  // RSI and Stochastic must agree on direction
-  if (rsiDir !== stochDir) {
-    return { direction: 'BUY', score: 0, indicators: [], notes: `RSI (${rsiDir}) and Stochastic (${stochDir}) disagree`, entryPrice: +currentPrice.toFixed(6) };
-  }
-
-  // ── 3. MACD — histogram must confirm the same direction ──────────────────
+  // ── 3. MACD histogram ─────────────────────────────────────────────────────
   const macdResult = macd(closes);
-  if (!macdResult) return { direction: 'BUY', score: 0, indicators: [], notes: 'MACD N/A', entryPrice: +currentPrice.toFixed(6) };
+  if (macdResult && macdResult.direction !== 'NEUTRAL') {
+    votes.push({ dir: macdResult.direction, strength: Math.min(100, macdResult.strength ?? 50), label: 'MACD', note: `MACD ${macdResult.direction === 'BUY' ? 'bullish' : 'bearish'} (hist ${macdResult.histogram > 0 ? '+' : ''}${macdResult.histogram})` });
+  }
 
-  const macdDir = macdResult.direction; // 'BUY' | 'SELL' | 'NEUTRAL'
+  // ── 4. Bollinger Bands ────────────────────────────────────────────────────
+  // BUY  when price touches/breaks below lower band (mean-reversion up)
+  // SELL when price touches/breaks above upper band (mean-reversion down)
+  const bbResult = bollingerBands(closes, 20, 2);
+  if (bbResult && bbResult.signal !== 'NEUTRAL') {
+    votes.push({ dir: bbResult.signal, strength: Math.min(100, bbResult.strength ?? 50), label: 'Bollinger Bands', note: bbResult.signal === 'BUY' ? `Price at lower BB (${bbResult.lower.toFixed(5)})` : `Price at upper BB (${bbResult.upper.toFixed(5)})` });
+  }
 
-  if (macdDir === 'NEUTRAL' || macdDir !== stochDir) {
+  // ── Count agreement ───────────────────────────────────────────────────────
+  const buyVotes  = votes.filter((v) => v.dir === 'BUY');
+  const sellVotes = votes.filter((v) => v.dir === 'SELL');
+
+  const direction   = buyVotes.length >= sellVotes.length ? 'BUY' : 'SELL';
+  const agreeVotes  = direction === 'BUY' ? buyVotes : sellVotes;
+
+  // Need at least 2 indicators agreeing
+  if (agreeVotes.length < 2) {
     return {
-      direction: 'BUY', score: 0, indicators: [],
-      notes: `MACD (${macdDir}) does not confirm ${stochDir} signal`,
-      entryPrice: +currentPrice.toFixed(6),
+      direction, score: 0, indicators: [], entryPrice: +currentPrice.toFixed(6),
+      notes: `Only ${agreeVotes.length} indicator(s) agree — need at least 2`,
     };
   }
 
-  // ── All three agree — compute final confidence score ──────────────────────
-  const direction = stochDir; // BUY or SELL (all three match)
-
-  // Average strength of the three indicators (0–100 each)
-  const avgStrength = (stochStrength + rsiStrength + (macdResult.strength ?? 50)) / 3;
-
-  // ATR filter — block extreme volatility
+  // ── ATR filter ────────────────────────────────────────────────────────────
   const atrValue = atr(highs, lows, closes, 14);
   const atrPct   = atrValue ? (atrValue / currentPrice) * 100 : 0;
-
   if (atrPct > 3.0) {
-    return { direction, score: 0, indicators: [], notes: 'Extreme volatility — skipped', entryPrice: +currentPrice.toFixed(6) };
+    return { direction, score: 0, indicators: [], entryPrice: +currentPrice.toFixed(6), notes: 'Extreme volatility — skipped' };
   }
+  const volMultiplier = atrPct > 1.0 ? 0.90 : 1.0;
 
-  const volatilityMultiplier = atrPct > 1.0 ? 0.90 : 1.0;
-
-  // Score: base 40 + indicator strength contribution, capped at 100
-  const score = Math.min(100, Math.round(40 + avgStrength * 0.6 * volatilityMultiplier));
-
-  const notes = [
-    `Stoch %K ${k.toFixed(1)} / %D ${stochResult.d.toFixed(1)} (${direction === 'BUY' ? 'oversold <20' : 'overbought >80'})`,
-    `RSI ${rsiVal.toFixed(1)} (${direction === 'BUY' ? 'oversold <30' : 'overbought >70'})`,
-    `MACD ${direction === 'BUY' ? 'bullish' : 'bearish'} (hist ${macdResult.histogram > 0 ? '+' : ''}${macdResult.histogram})`,
-  ].join(' | ');
+  // ── Confidence score ──────────────────────────────────────────────────────
+  const avgStrength = agreeVotes.reduce((s, v) => s + v.strength, 0) / agreeVotes.length;
+  // All 4 agreeing gets the highest bonus, 3 gets a medium bonus
+  const confluenceBonus = agreeVotes.length >= 4 ? 1.30 : agreeVotes.length >= 3 ? 1.20 : 1.0;
+  const score = Math.min(100, Math.round((40 + avgStrength * 0.6) * volMultiplier * confluenceBonus));
 
   return {
     direction,
     score,
-    indicators: ['Stochastic', 'RSI', 'MACD'],
-    notes,
+    indicators: agreeVotes.map((v) => v.label),
+    notes:      agreeVotes.map((v) => v.note).join(' | '),
     entryPrice: +currentPrice.toFixed(6),
-    atrPct: +atrPct.toFixed(4),
+    atrPct:     +atrPct.toFixed(4),
   };
 }
 
