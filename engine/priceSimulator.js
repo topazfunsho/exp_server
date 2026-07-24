@@ -17,6 +17,7 @@
 
 const ASSETS = {
   'EUR/USD': { basePrice: 1.0850, volatility: 0.0008 },
+  'GBP/USD': { basePrice: 1.2700, volatility: 0.0010 },
 };
 
 const priceState = {};
