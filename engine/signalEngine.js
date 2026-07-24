@@ -147,12 +147,19 @@ async function run() {
     console.log('[Engine] Created system user');
   }
 
-  // Do NOT expire previous signals — let them all stay on the dashboard
-  // until the user acts on each one individually.
+  // Align entry to the next 3-minute candle boundary on the market clock.
+  // e.g. if now = 09:01:45, the next 3m candle opens at 09:03:00
+  // We send the signal 10s before that: entryTime = 09:03:00, signal arrives at 09:02:50
+  const now              = Date.now();
+  const candleMs         = TRADE_DURATION_SECS * 1000;            // 180 000 ms
+  const msIntoCandle     = now % candleMs;                        // how far into current candle
+  const msUntilNextCandle = candleMs - msIntoCandle;              // ms until next candle opens
 
-  const now        = Date.now();
-  const entryTime  = new Date(now + PREP_SECS * 1000);
-  const expiryTime = new Date(now + PREP_SECS * 1000 + TRADE_DURATION_SECS * 1000);
+  // entryTime  = start of the next 3m candle (market-aligned)
+  // signal is delivered PREP_SECS before that so user has time to open the trade
+  // expiryTime = entryTime + 3 minutes (end of that candle)
+  const entryTime  = new Date(now + msUntilNextCandle);
+  const expiryTime = new Date(now + msUntilNextCandle + candleMs);
 
   const signal = await Signal.create({
     asset:       best.symbol,

@@ -1,21 +1,30 @@
 /**
  * Signal Scheduler
  *
- * Runs the engine every 15 seconds continuously.
- * When the three-condition gate (Stochastic + RSI + MACD) fires, a new
- * signal is created and pushed to the dashboard immediately — without
- * waiting for previous signals to expire first.
+ * Fires the engine exactly PREP_SECS (10s) before each 3-minute candle opens,
+ * so signals arrive on the dashboard with 10s prep time before entry.
  *
- * Multiple signals can be live on the dashboard at the same time.
+ * After emitting a signal the scheduler sleeps until 10s before the NEXT candle.
+ * If no signal qualifies, it retries 10s before the following candle.
  */
 
 'use strict';
 
 const Signal = require('../models/Signal');
-const { run, TRADE_DURATION_SECS } = require('./signalEngine');
+const { run, TRADE_DURATION_SECS, ENTRY_DELAY_SECS } = require('./signalEngine');
 
-// How often to check for a new signal (seconds)
-const CHECK_INTERVAL_SECS = 15;
+const CANDLE_MS = TRADE_DURATION_SECS * 1000; // 180 000 ms
+
+/** ms until the engine should run next (10s before the next candle boundary) */
+function msUntilNextRun() {
+  const now           = Date.now();
+  const msIntoCandle  = now % CANDLE_MS;
+  const msToNextCandle = CANDLE_MS - msIntoCandle;
+  // Fire ENTRY_DELAY_SECS before the candle opens
+  // If we're already past that prep window, wait for the one after next
+  const msToPrepWindow = msToNextCandle - ENTRY_DELAY_SECS * 1000;
+  return msToPrepWindow > 0 ? msToPrepWindow : msToPrepWindow + CANDLE_MS;
+}
 
 let schedulerTimer = null;
 let lifecycleTimer = null;
@@ -31,15 +40,18 @@ async function tick() {
   try {
     const signal = await run();
     if (signal) {
-      console.log(`[Scheduler] New signal emitted — ${signal.asset} ${signal.direction}`);
+      console.log(`[Scheduler] Signal emitted — ${signal.asset} ${signal.direction} | entry ${new Date(signal.entryTime).toLocaleTimeString()}`);
+    } else {
+      console.log('[Scheduler] No qualifying setup this candle — next check in', Math.round(msUntilNextRun() / 1000), 's');
     }
   } catch (err) {
     console.error('[Scheduler] Engine error:', err.message);
   } finally {
     isRunning = false;
     if (!paused) {
-      // Always retry after CHECK_INTERVAL_SECS — never wait for candle expiry
-      schedulerTimer = setTimeout(tick, CHECK_INTERVAL_SECS * 1000);
+      const delay = msUntilNextRun();
+      console.log(`[Scheduler] Next engine run in ${Math.round(delay / 1000)}s`);
+      schedulerTimer = setTimeout(tick, delay);
     }
   }
 }
@@ -81,12 +93,11 @@ function start() {
   }
 
   paused = false;
-  console.log(`[Scheduler] Starting — 10s prep + ${TRADE_DURATION_SECS}s candle`);
+  const delay = msUntilNextRun();
+  console.log(`[Scheduler] Starting — first run in ${Math.round(delay / 1000)}s (10s before next 3m candle)`);
+  schedulerTimer = setTimeout(tick, delay);
 
-  // Fire immediately on startup
-  schedulerTimer = setTimeout(tick, 0);
-
-  // Lifecycle checker every 5 seconds (catches the 10s pending→active transition)
+  // Lifecycle checker every 5 seconds
   lifecycleTimer = setInterval(expireStaleSignals, 5_000);
   expireStaleSignals();
 }
